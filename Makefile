@@ -97,7 +97,8 @@ KEEP_SYMS := simple_select_cpu simple_enqueue simple_dispatch \
              _LICENSE
 INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list=$(s))
 $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-linked.bc
-	$(OPT) $(INTERNALIZE) -passes='internalize,globaldce,default<O2>' $< -o $@
+	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold \
+		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@
 
 # --- Final BPF object ---
 $(BLDDIR)/%.o: $(BLDDIR)/%-opt.bc

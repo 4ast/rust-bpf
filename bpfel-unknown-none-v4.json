@@ -12,7 +12,7 @@
     "min-atomic-width": 8,
     "no-builtins": true,
     "obj-is-bitcode": true,
-    "panic-strategy": "abort",
+    "panic-strategy": "unwind",
     "position-independent-executables": true,
     "singlethread": true,
     "target-pointer-width": 64,

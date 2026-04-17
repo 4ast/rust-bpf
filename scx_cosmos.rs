@@ -40,14 +40,33 @@ const SCX_PICK_IDLE_CORE: u64 = 1;
 const PF_IDLE: u32 = 0x0000_0002;
 const PF_EXITING: u32 = 0x0000_0004;
 
-// ── Kfunc bindings ───────────────────────────────────────────────────
+// ── BPF helpers (called via helper ID, not kfunc BTF) ────────────────
+
+macro_rules! bpf_helper {
+    (fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty = $id:expr) => {
+        unsafe fn $name($($arg: $ty),*) -> $ret {
+            let f: unsafe extern "C" fn($($ty),*) -> $ret = core::mem::transmute($id as usize);
+            f($($arg),*)
+        }
+    };
+    (fn $name:ident($($arg:ident: $ty:ty),*) = $id:expr) => {
+        #[allow(dead_code)]
+        unsafe fn $name($($arg: $ty),*) {
+            let f: unsafe extern "C" fn($($ty),*) = core::mem::transmute($id as usize);
+            f($($arg),*)
+        }
+    };
+}
+
+bpf_helper!(fn bpf_ktime_get_ns() -> u64 = 5);
+bpf_helper!(fn bpf_get_smp_processor_id() -> i32 = 8);
+bpf_helper!(fn bpf_get_current_task_btf() -> *mut task_struct = 158);
+
+// ── Kfunc bindings (resolved via BTF at load time) ───────────────────
 
 extern "C" {
     fn bpf_alloc(size: u64, flags: u64) -> *mut u8;
     fn bpf_free(ptr: *mut u8);
-    fn bpf_ktime_get_ns() -> u64;
-    fn bpf_get_smp_processor_id() -> i32;
-    fn bpf_get_current_task_btf() -> *mut task_struct;
     fn bpf_cpumask_test_cpu(cpu: i32, mask: *const u64) -> bool;
     fn bpf_cpumask_first(mask: *const u64) -> i32;
     fn bpf_cpumask_intersects(a: *const u64, b: *const u64) -> bool;

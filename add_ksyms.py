@@ -143,6 +143,25 @@ if re.search(r'^\s+resume\s', text, re.MULTILINE):
         f'declare !dbg !{dbg_id} void @_Unwind_Resume(ptr) '
         f'#{attr_num} section ".ksyms"')
 
+# Fix BTF linkage: Rust emits DISPFlagDefinition | DISPFlagOptimized for all
+# functions, even internal ones. Without DISPFlagLocalToUnit, LLC generates
+# BTF FUNC with linkage=global. The verifier then treats internal subprogs as
+# global, validating caller args against the BTF signature independently.
+# This fails when the optimizer drops dead args (e.g. #[track_caller]'s
+# implicit &Location). Add DISPFlagLocalToUnit to every DISubprogram attached
+# to a `define internal` function so LLC emits linkage=static in BTF.
+internal_dbg_ids = set()
+for m in re.finditer(r'^define\s+internal\s.*!dbg\s+(!\d+)', text, re.MULTILINE):
+    internal_dbg_ids.add(m.group(1))
+
+for dbg_id in internal_dbg_ids:
+    text = re.sub(
+        r'(' + re.escape(dbg_id) + r'\s*=\s*distinct\s+!DISubprogram\([^)]*'
+        r'spFlags:\s*)(DISPFlagDefinition)',
+        r'\1DISPFlagLocalToUnit | DISPFlagDefinition',
+        text,
+    )
+
 # Strip 'noreturn' so LLVM doesn't DCE code after noreturn calls.
 text = re.sub(r'\bnoreturn\b', '', text)
 text = re.sub(r'^attributes (#\d+) = \{\s*\}$',

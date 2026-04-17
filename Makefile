@@ -88,7 +88,8 @@ $(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc
 # --- Optimize after linking (inlines trivial functions, DCE) ---
 # Internalize everything except struct_ops entry points and license,
 # then optimize. This lets opt remove dead global symbols.
-KEEP_SYMS := simple_select_cpu simple_enqueue simple_dispatch \
+KEEP_SYMS := simple_ops \
+             simple_select_cpu simple_enqueue simple_dispatch \
              simple_running simple_stopping simple_enable \
              simple_init simple_exit \
              cosmos_select_cpu cosmos_tick cosmos_enqueue cosmos_dispatch \

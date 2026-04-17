@@ -249,36 +249,52 @@ fn oom(_: Layout) -> ! {
 }
 
 // -- struct_ops map definition --
-// libbpf matches fields by name via BTF, not by type.
-// Use Option<fn()> as an opaque function pointer — the actual
-// signatures live on the callbacks themselves.
+// libbpf requires function pointer types (not *const ()) for struct_ops
+// relocations. Use a union to reinterpret fn item pointers as a common
+// extern "C" fn() type in const context.
+
+// libbpf requires function pointer types for struct_ops relocations.
+// Use a union to reinterpret fn item pointers as a common extern "C"
+// fn() type in const context.
+
+type OpFn = unsafe extern "C" fn();
+
+#[repr(C)]
+union FnPtr {
+    rust: *const (),
+    op: OpFn,
+}
 
 #[repr(C)]
 struct sched_ext_ops {
-    select_cpu: *const (),
-    enqueue: *const (),
-    dispatch: *const (),
-    running: *const (),
-    stopping: *const (),
-    enable: *const (),
-    init: *const (),
-    exit: *const (),
+    select_cpu: OpFn,
+    enqueue: OpFn,
+    dispatch: OpFn,
+    running: OpFn,
+    stopping: OpFn,
+    enable: OpFn,
+    init: OpFn,
+    exit: OpFn,
     name: [u8; 7],
 }
 
 unsafe impl Sync for sched_ext_ops {}
 
+const fn as_op(f: *const ()) -> OpFn {
+    unsafe { FnPtr { rust: f }.op }
+}
+
 #[link_section = ".struct_ops.link"]
 #[no_mangle]
 static simple_ops: sched_ext_ops = sched_ext_ops {
-    select_cpu: simple_select_cpu as *const (),
-    enqueue: simple_enqueue as *const (),
-    dispatch: simple_dispatch as *const (),
-    running: simple_running as *const (),
-    stopping: simple_stopping as *const (),
-    enable: simple_enable as *const (),
-    init: simple_init as *const (),
-    exit: simple_exit as *const (),
+    select_cpu: as_op(simple_select_cpu as *const ()),
+    enqueue: as_op(simple_enqueue as *const ()),
+    dispatch: as_op(simple_dispatch as *const ()),
+    running: as_op(simple_running as *const ()),
+    stopping: as_op(simple_stopping as *const ()),
+    enable: as_op(simple_enable as *const ()),
+    init: as_op(simple_init as *const ()),
+    exit: as_op(simple_exit as *const ()),
     name: *b"simple\0",
 };
 

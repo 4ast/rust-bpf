@@ -52,17 +52,19 @@ text = re.sub(
     flags=re.MULTILINE,
 )
 
-# LLC lowers llvm.memcpy/memmove/memset intrinsics to libc calls, but
-# those won't have BTF/.ksyms info. Replace intrinsic calls with direct
-# calls to declared @memcpy/@memmove/@memset with .ksyms section.
+# LLC lowers llvm.memcpy/memmove/memset intrinsics and the memcmp libcall
+# to plain extern symbols (@memcpy, @memcmp, ...). The kernel doesn't expose
+# those names as kfuncs, so rename them to the arena-aware bpf_arena_* kfuncs:
 #
-# llvm.memcpy.p0.p0.i64(dst, src, len, isvolatile) -> memcpy(dst, src, len)
-# llvm.memmove.p0.p0.i64(dst, src, len, isvolatile) -> memmove(dst, src, len)
+#   llvm.memcpy.p0.p0.i64(dst, src, len, isvolatile) -> bpf_arena_memcpy(dst, src, len)
+#   llvm.memmove.p0.p0.i64(dst, src, len, isvolatile) -> bpf_arena_memcpy(dst, src, len)
+#   (both overlapping and non-overlapping copies go through bpf_arena_memcpy
+#    for now; memmove semantics can be added as a separate kfunc later)
+#   call ... @memcmp(...) -> call ... @bpf_arena_memcmp(...)
+#   call ... @memcpy(...) -> call ... @bpf_arena_memcpy(...)
 mem_intrinsics = {
-    'memcpy':  (r'call void @llvm\.memcpy\.p0\.p0\.i64\('
-                r'(ptr[^,]*),\s*(ptr[^,]*),\s*(i64[^,]*),\s*i1[^)]*\)'),
-    'memmove': (r'call void @llvm\.memmove\.p0\.p0\.i64\('
-                r'(ptr[^,]*),\s*(ptr[^,]*),\s*(i64[^,]*),\s*i1[^)]*\)'),
+    'bpf_arena_memcpy': (r'call void @llvm\.(?:memcpy|memmove)\.p0\.p0\.i64\('
+                         r'(ptr[^,]*),\s*(ptr[^,]*),\s*(i64[^,]*),\s*i1[^)]*\)'),
 }
 
 # Find an attribute group number used by other extern decls.
@@ -72,13 +74,11 @@ attr_num = attr_match.group(1) if attr_match else '1'
 extra_decls = []
 for name, pattern in mem_intrinsics.items():
     if re.search(pattern, text):
-        # Replace intrinsic calls with direct calls (void — discard result).
         text = re.sub(
             pattern,
             rf'call void @{name}(\1, \2, \3)',
             text,
         )
-        # Add declaration.
         dbg_id = next_id
         subrt_id = next_id + 1
         next_id += 2
@@ -92,6 +92,23 @@ for name, pattern in mem_intrinsics.items():
         extra_decls.append(
             f'declare !dbg !{dbg_id} void @{name}(ptr, ptr, i64) '
             f'#{attr_num} section ".ksyms"')
+
+# Rename memcmp/memcpy libcalls (produced by LLVM's lowering of slice
+# comparisons / copies) to the arena-aware bpf_arena_* kfuncs. This covers
+# both the `declare` lines add_ksyms() already tagged and every call site.
+# We also rename the matching DISubprogram debug-info name, because LLC
+# derives the BTF FUNC name from that rather than from the LLVM symbol —
+# if we only renamed the symbol, libbpf would see `bpf_arena_memcmp` in the
+# ELF symbol table but `memcmp` in BTF and fail the kfunc resolve.
+libcall_renames = {
+    'memcmp': 'bpf_arena_memcmp',
+    'memcpy': 'bpf_arena_memcpy',
+}
+for old, new in libcall_renames.items():
+    text = re.sub(r'(?<![A-Za-z0-9_.])@' + re.escape(old) + r'\b',
+                  '@' + new, text)
+    text = re.sub(r'(!DISubprogram\(name:\s*")' + re.escape(old) + r'"',
+                  r'\g<1>' + new + '"', text)
 
 # LLC lowers 'resume' instructions to calls to _Unwind_Resume.
 # Replace resume with a direct call so BTF/.ksyms picks it up.

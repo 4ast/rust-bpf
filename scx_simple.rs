@@ -275,13 +275,23 @@ struct sched_ext_ops {
     enable: OpFn,
     init: OpFn,
     exit: OpFn,
-    name: [u8; 7],
+    name: [u8; 128],
 }
 
 unsafe impl Sync for sched_ext_ops {}
 
 const fn as_op(f: *const ()) -> OpFn {
     unsafe { FnPtr { rust: f }.op }
+}
+
+const fn pad_name<const N: usize>(s: &[u8; N]) -> [u8; 128] {
+    let mut buf = [0u8; 128];
+    let mut i = 0;
+    while i < N && i < 127 {
+        buf[i] = s[i];
+        i += 1;
+    }
+    buf
 }
 
 #[link_section = ".struct_ops.link"]
@@ -295,7 +305,7 @@ static simple_ops: sched_ext_ops = sched_ext_ops {
     enable: as_op(simple_enable as *const ()),
     init: as_op(simple_init as *const ()),
     exit: as_op(simple_exit as *const ()),
-    name: *b"simple\0",
+    name: pad_name(b"simple"),
 };
 
 #[link_section = "license"]

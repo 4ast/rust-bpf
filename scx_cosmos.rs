@@ -880,11 +880,15 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
 
 bpf_prog!("struct_ops/cosmos_dispatch",
 fn cosmos_dispatch(cpu: i32, prev: *mut task_struct) {
-    let prev = TaskRef(prev);
-    let prev = &prev;
     if unsafe { scx_bpf_dsq_move_to_local(shared_dsq(cpu)) } {
         return 0;
     }
+
+    if prev.is_null() {
+        return 0;
+    }
+    let prev = TaskRef(prev);
+    let prev = &prev;
 
     if keep_running(prev, cpu) {
         prev.set_scx_slice(task_slice(prev));

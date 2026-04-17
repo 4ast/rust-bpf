@@ -101,12 +101,19 @@ $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-linked.bc
 	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold \
 		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@
 
-# --- Add section ".ksyms" to extern function declarations ---
+# --- Add .ksyms, lower invoke→call, unreachable→ret for BPF ---
+# add_ksyms.py converts invoke→call, making landing pad blocks dead.
+# simplifycfg removes those dead blocks. add_ksyms.py then fixes any
+# remaining unreachable (e.g. switch defaults).
 $(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc
 	$(LLVM_DIS) $< -o $@.ll
 	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(LLVM_AS) $@.ll -o $@.tmp.bc
+	$(OPT) -passes=simplifycfg $@.tmp.bc -o $@.tmp2.bc
+	$(LLVM_DIS) $@.tmp2.bc -o $@.ll
+	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@
-	@rm -f $@.ll
+	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc
 
 # --- Final BPF object ---
 $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc

@@ -126,6 +126,65 @@ if re.search(r'^\s+resume\s', text, re.MULTILINE):
         f'declare !dbg !{dbg_id} void @_Unwind_Resume(ptr) '
         f'#{attr_num} section ".ksyms"')
 
+# Strip 'noreturn' so LLVM doesn't DCE code after noreturn calls.
+text = re.sub(r'\bnoreturn\b', '', text)
+text = re.sub(r'^attributes (#\d+) = \{\s*\}$',
+              r'attributes \1 = { noinline }', text, flags=re.MULTILINE)
+
+# Convert 'invoke' to 'call' + 'br', dropping the unwind path.
+# BPF has no exception handling.
+def lower_invoke(m):
+    indent = m.group(1)
+    ret_assign = m.group(2) or ''
+    tail = m.group(3)
+    normal = m.group(4)
+    meta = m.group(5) or ''
+    call_meta = re.sub(r',\s*!noalias\s+!\d+', '', meta)
+    return (f'{indent}{ret_assign}call {tail.rstrip()}{call_meta}\n'
+            f'{indent}br label %{normal}{call_meta}')
+
+text = re.sub(
+    r'^(\s+)((?:%\S+\s*=\s*)?)'
+    r'invoke\s+'
+    r'(.*?)'
+    r'\s+to\s+label\s+%(\S+)'
+    r'\s+unwind\s+label\s+%\S+'
+    r'((?:,\s*!\w+\s+!\d+)*)$',
+    lower_invoke,
+    text,
+    flags=re.MULTILINE,
+)
+
+# Replace 'unreachable' with 'ret'. 'ret' compiles to a BPF exit insn.
+# BPF verifier requires every subprogram to end with exit or jmp.
+def fix_unreachable(text):
+    lines = text.split('\n')
+    out = []
+    ret_type = 'void'
+    for line in lines:
+        m = re.match(r'define\s.*?\s+(@\S+)\(', line)
+        if m:
+            rt = re.search(r'define\s+(?:internal\s+)?(?:fastcc\s+)?(?:noundef\s+)?(?:zeroext\s+)?(\S+)\s+@', line)
+            if rt:
+                ret_type = rt.group(1)
+        if re.match(r'  +unreachable', line):
+            indent = re.match(r'(  +)', line).group(1)
+            meta = ''
+            mm = re.search(r'(,\s*!dbg\s+!\d+)', line)
+            if mm:
+                meta = mm.group(1)
+            if ret_type == 'void':
+                out.append(f'{indent}ret void{meta}')
+            elif ret_type in ('i1', 'i8', 'i16', 'i32', 'i64'):
+                out.append(f'{indent}ret {ret_type} 0{meta}')
+            else:
+                out.append(f'{indent}ret {ret_type} zeroinitializer{meta}')
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+text = fix_unreachable(text)
+
 # Insert extra declares before the first 'attributes' line.
 if extra_decls:
     text = re.sub(

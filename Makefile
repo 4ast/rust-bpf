@@ -92,6 +92,7 @@ KEEP_SYMS := simple_ops \
              simple_select_cpu simple_enqueue simple_dispatch \
              simple_running simple_stopping simple_enable \
              simple_init simple_exit \
+             cosmos_ops \
              cosmos_select_cpu cosmos_tick cosmos_enqueue cosmos_dispatch \
              cosmos_runnable cosmos_running cosmos_stopping \
              cosmos_enable cosmos_init_task cosmos_exit_task \

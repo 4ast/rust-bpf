@@ -643,10 +643,33 @@ fn keep_running(p: &TaskRef, cpu: i32) -> bool {
 }
 
 // ── struct_ops callbacks ─────────────────────────────────────────────
+// Kernel passes arguments through a ctx array. bpf_prog! extracts args
+// from ctx[0], ctx[1], ... like C's BPF_PROG macro.
 
-#[link_section = "struct_ops/cosmos_select_cpu"]
-#[no_mangle]
-fn cosmos_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
+#[repr(C)]
+#[allow(dead_code)]
+struct ScxExitInfo { /* opaque */ }
+
+macro_rules! bpf_prog {
+    ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? {$($t:tt)*}) => {
+        #[link_section = $section]
+        #[no_mangle]
+        extern "C" fn $name(_ctx: *const u64) -> i32 {
+            let mut _i = 0usize;
+            $(
+                #[allow(unused_assignments)]
+                let $arg = { let v = unsafe { *_ctx.add(_i) } as $ty; _i += 1; v };
+            )*
+            { $($t)* };
+            0
+        }
+    };
+}
+
+bpf_prog!("struct_ops/cosmos_select_cpu",
+fn cosmos_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
+    let p = TaskRef(p);
+    let p = &p;
     let current = unsafe { &*bpf_get_current_task_btf() };
     let current_ref = TaskRef(current as *const task_struct as *mut task_struct);
     let this_cpu = unsafe { bpf_get_smp_processor_id() };
@@ -658,7 +681,6 @@ fn cosmos_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
         None => return prev_cpu,
     };
 
-    // Fix prev_cpu if not allowed
     let mut prev = prev_cpu;
     if !p.cpu_allowed(prev) {
         prev = if is_this_allowed { this_cpu } else {
@@ -666,7 +688,6 @@ fn cosmos_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
         };
     }
 
-    // Address space affinity: waker and wakee share mm, same CPU
     if is_wake_affine(&current_ref, p) && !is_busy {
         if this_cpu == prev {
             unsafe { scx_bpf_dsq_insert(p.0, SCX_DSQ_LOCAL, task_slice(p), 0) };
@@ -674,7 +695,6 @@ fn cosmos_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
         }
     }
 
-    // GPU affinity: move to GPU's NUMA node
     if GPU_ENABLED.load(Relaxed) && NUMA_ENABLED.load(Relaxed) {
         let cpu = pick_cpu_on_gpu_node(p, cpu_node(prev), tctx);
         if cpu >= 0 {
@@ -684,7 +704,6 @@ fn cosmos_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
         }
     }
 
-    // Find an idle CPU
     let cpu = pick_idle_cpu(p, prev, if is_this_allowed { this_cpu } else { -1 },
                             wake_flags, false);
     if cpu >= 0 || !is_busy {
@@ -692,16 +711,17 @@ fn cosmos_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
     }
 
     if cpu >= 0 { cpu } else { prev }
-}
+});
 
-#[link_section = "struct_ops/cosmos_tick"]
-#[no_mangle]
-fn cosmos_tick(p: &TaskRef) {
-    if !TICK_PREEMPT.load(Relaxed) { return; }
+bpf_prog!("struct_ops/cosmos_tick",
+fn cosmos_tick(p: *mut task_struct) {
+    let p = TaskRef(p);
+    let p = &p;
+    if !TICK_PREEMPT.load(Relaxed) { return 0; }
 
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return,
+        None => return 0,
     };
 
     if time_delta(now(), tctx.last_run_at) > task_slice(p) {
@@ -716,20 +736,20 @@ fn cosmos_tick(p: &TaskRef) {
             p.scx_mut().slice = 0;
         }
     }
-}
+});
 
-#[link_section = "struct_ops/cosmos_enqueue"]
-#[no_mangle]
-fn cosmos_enqueue(p: &TaskRef, enq_flags: u64) {
+bpf_prog!("struct_ops/cosmos_enqueue",
+fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
+    let p = TaskRef(p);
+    let p = &p;
     let prev_cpu = p.cpu();
     let node = cpu_node(prev_cpu);
 
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return,
+        None => return 0,
     };
 
-    // GPU affinity migration
     if GPU_ENABLED.load(Relaxed) && NUMA_ENABLED.load(Relaxed) &&
        !p.is_pcpu() && task_should_migrate(p) {
         let cpu = pick_cpu_on_gpu_node(p, node, tctx);
@@ -742,15 +762,13 @@ fn cosmos_enqueue(p: &TaskRef, enq_flags: u64) {
                     scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
                 }
             }
-            return;
+            return 0;
         }
     }
 
-    // Sticky event-heavy: keep on same CPU
     if is_sticky_event_heavy(tctx) &&
        (is_primary_cpu(prev_cpu) || p.is_pcpu()) &&
        (!AVOID_SMT.load(Relaxed) || !is_smt_contended(prev_cpu)) {
-        // Check no per-CPU task is starving
         unsafe {
             scx_bpf_dsq_insert(p.0, SCX_DSQ_LOCAL, task_slice(p), enq_flags);
         }
@@ -758,10 +776,9 @@ fn cosmos_enqueue(p: &TaskRef, enq_flags: u64) {
         if !p.is_running() {
             unsafe { scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE) };
         }
-        return;
+        return 0;
     }
 
-    // Try migration to idle CPU
     if task_should_migrate(p) ||
        !is_cpu_idle(prev_cpu) ||
        (AVOID_SMT.load(Relaxed) && is_smt_contended(prev_cpu)) ||
@@ -783,11 +800,10 @@ fn cosmos_enqueue(p: &TaskRef, enq_flags: u64) {
             if cpu != prev_cpu || !p.is_running() {
                 unsafe { scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE) };
             }
-            return;
+            return 0;
         }
     }
 
-    // Keep on same CPU if not busy and primary
     if !is_cpu_busy(prev_cpu) && (is_primary_cpu(prev_cpu) || p.is_pcpu()) {
         unsafe {
             scx_bpf_dsq_insert(p.0, SCX_DSQ_LOCAL_ON | prev_cpu as u64,
@@ -796,10 +812,9 @@ fn cosmos_enqueue(p: &TaskRef, enq_flags: u64) {
         if task_should_migrate(p) {
             unsafe { scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE) };
         }
-        return;
+        return 0;
     }
 
-    // Fall back to shared DSQ with deadline
     let deadline = task_deadline(p, tctx);
     unsafe {
         scx_bpf_dsq_insert_vtime(p.0, shared_dsq(prev_cpu),
@@ -808,27 +823,29 @@ fn cosmos_enqueue(p: &TaskRef, enq_flags: u64) {
     if task_should_migrate(p) {
         unsafe { scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE) };
     }
-}
+});
 
-#[link_section = "struct_ops/cosmos_dispatch"]
-#[no_mangle]
-fn cosmos_dispatch(cpu: i32, prev: &TaskRef) {
+bpf_prog!("struct_ops/cosmos_dispatch",
+fn cosmos_dispatch(cpu: i32, prev: *mut task_struct) {
+    let prev = TaskRef(prev);
+    let prev = &prev;
     if unsafe { scx_bpf_dsq_move_to_local(shared_dsq(cpu)) } {
-        return;
+        return 0;
     }
 
     if keep_running(prev, cpu) {
         prev.scx_mut().slice = task_slice(prev);
     }
-}
+});
 
-#[link_section = "struct_ops/cosmos_runnable"]
-#[no_mangle]
-fn cosmos_runnable(p: &TaskRef, _enq_flags: u64) {
+bpf_prog!("struct_ops/cosmos_runnable",
+fn cosmos_runnable(p: *mut task_struct, _enq_flags: u64) {
+    let p = TaskRef(p);
+    let p = &p;
     let t = now();
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return,
+        None => return 0,
     };
 
     tctx.exec_runtime = 0;
@@ -837,14 +854,15 @@ fn cosmos_runnable(p: &TaskRef, _enq_flags: u64) {
     tctx.wakeup_freq = update_freq(tctx.wakeup_freq, delta_t);
     tctx.wakeup_freq = min(tctx.wakeup_freq, 1024);
     tctx.last_woke_at = t;
-}
+});
 
-#[link_section = "struct_ops/cosmos_running"]
-#[no_mangle]
-fn cosmos_running(p: &TaskRef) {
+bpf_prog!("struct_ops/cosmos_running",
+fn cosmos_running(p: *mut task_struct) {
+    let p = TaskRef(p);
+    let p = &p;
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return,
+        None => return 0,
     };
 
     tctx.last_run_at = now();
@@ -854,20 +872,18 @@ fn cosmos_running(p: &TaskRef) {
     }
 
     update_cpufreq(p.cpu());
+});
 
-    // PMU: scx_pmu_event_start would be called here
-}
-
-#[link_section = "struct_ops/cosmos_stopping"]
-#[no_mangle]
-fn cosmos_stopping(p: &TaskRef, _runnable: bool) {
+bpf_prog!("struct_ops/cosmos_stopping",
+fn cosmos_stopping(p: *mut task_struct, _runnable: u64) {
+    let p = TaskRef(p);
+    let p = &p;
     let cpu = p.cpu();
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return,
+        None => return 0,
     };
 
-    // PMU
     if PERF_CONFIG.load(Relaxed) != 0 || PERF_STICKY.load(Relaxed) != 0 {
         update_counters(tctx, cpu);
     }
@@ -879,35 +895,34 @@ fn cosmos_stopping(p: &TaskRef, _runnable: bool) {
     tctx.exec_runtime = min(tctx.exec_runtime + scaled, slice_lag());
 
     update_cpu_load(p, scaled);
-}
+});
 
-#[link_section = "struct_ops/cosmos_enable"]
-#[no_mangle]
-fn cosmos_enable(p: &TaskRef) {
+bpf_prog!("struct_ops/cosmos_enable",
+fn cosmos_enable(p: *mut task_struct) {
+    let p = TaskRef(p);
     p.scx_mut().dsq_vtime = VTIME_NOW.load(Relaxed);
-}
+});
 
-#[link_section = "struct_ops/cosmos_init_task"]
-#[no_mangle]
-fn cosmos_init_task(p: &TaskRef) -> i32 {
+bpf_prog!("struct_ops/cosmos_init_task",
+fn cosmos_init_task(p: *mut task_struct) -> i32 {
+    let p = TaskRef(p);
     let ctxs = unsafe { &mut *TASK_CTXS.0.get() };
     if let Some(map) = ctxs {
         map.insert(p.pid(), TaskCtx::new());
     }
     0
-}
+});
 
-#[link_section = "struct_ops/cosmos_exit_task"]
-#[no_mangle]
-fn cosmos_exit_task(p: &TaskRef) {
+bpf_prog!("struct_ops/cosmos_exit_task",
+fn cosmos_exit_task(p: *mut task_struct) {
+    let p = TaskRef(p);
     let ctxs = unsafe { &mut *TASK_CTXS.0.get() };
     if let Some(map) = ctxs {
         map.remove(&p.pid());
     }
-}
+});
 
-#[link_section = "struct_ops/cosmos_init"]
-#[no_mangle]
+bpf_prog!("struct_ops/cosmos_init",
 fn cosmos_init() -> i32 {
     NR_CPU_IDS.store(unsafe { scx_bpf_nr_cpu_ids() }, Relaxed);
 
@@ -920,36 +935,28 @@ fn cosmos_init() -> i32 {
     let gpu_pid = unsafe { &mut *GPU_PID_MAP.0.get() };
     *gpu_pid = Some(BTreeMap::new());
 
-    // Create per-node DSQs or single shared DSQ
     if NUMA_ENABLED.load(Relaxed) {
         let nr_nodes = NR_NODE_IDS.load(Relaxed) as i32;
         for node in 0..nr_nodes {
             let ret = unsafe { scx_bpf_create_dsq(node as u64, node) };
             if ret != 0 { return ret; }
-            // init_node would populate NODE_CPUMASK here
         }
     } else {
         let ret = unsafe { scx_bpf_create_dsq(SHARED_DSQ, -1) };
         if ret != 0 { return ret; }
     }
 
-    // Reset per-CPU state
     let cpu_ctxs = unsafe { &mut *CPU_CTXS.0.get() };
     for c in cpu_ctxs.iter_mut() {
         c.perf_events = 0;
     }
 
     0
-}
+});
 
-#[repr(C)]
-struct ScxExitInfo {}
-
-#[link_section = "struct_ops/cosmos_exit"]
-#[no_mangle]
-fn cosmos_exit(_ei: &ScxExitInfo) {
-    // scx_pmu_uninstall would be called here
-}
+bpf_prog!("struct_ops/cosmos_exit",
+fn cosmos_exit(_ei: *const ScxExitInfo) {
+});
 
 // ── Syscall handlers (SEC("syscall")) ────────────────────────────────
 
@@ -1008,6 +1015,57 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 fn oom(_: Layout) -> ! {
     unsafe { bpf_throw(12) }
 }
+
+// ── struct_ops map definition ────────────────────────────────────────
+
+type OpFn = extern "C" fn(*const u64) -> i32;
+
+#[repr(C)]
+struct sched_ext_ops {
+    select_cpu: OpFn,
+    enqueue: OpFn,
+    dispatch: OpFn,
+    tick: OpFn,
+    runnable: OpFn,
+    running: OpFn,
+    stopping: OpFn,
+    enable: OpFn,
+    init_task: OpFn,
+    exit_task: OpFn,
+    init: OpFn,
+    exit: OpFn,
+    name: [u8; 128],
+}
+
+unsafe impl Sync for sched_ext_ops {}
+
+const fn pad_name<const N: usize>(s: &[u8; N]) -> [u8; 128] {
+    let mut buf = [0u8; 128];
+    let mut i = 0;
+    while i < N && i < 127 {
+        buf[i] = s[i];
+        i += 1;
+    }
+    buf
+}
+
+#[link_section = ".struct_ops.link"]
+#[no_mangle]
+static cosmos_ops: sched_ext_ops = sched_ext_ops {
+    select_cpu: cosmos_select_cpu,
+    enqueue: cosmos_enqueue,
+    dispatch: cosmos_dispatch,
+    tick: cosmos_tick,
+    runnable: cosmos_runnable,
+    running: cosmos_running,
+    stopping: cosmos_stopping,
+    enable: cosmos_enable,
+    init_task: cosmos_init_task,
+    exit_task: cosmos_exit_task,
+    init: cosmos_init,
+    exit: cosmos_exit,
+    name: pad_name(b"cosmos"),
+};
 
 #[link_section = "license"]
 #[no_mangle]

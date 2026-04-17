@@ -134,89 +134,99 @@ fn stat_inc(key: &'static str) {
 }
 
 // -- struct_ops callbacks --
+// The kernel passes struct_ops arguments through a ctx array.
+// bpf_prog! extracts args from ctx[0], ctx[1], etc. like C's BPF_PROG macro.
 
-#[link_section = "struct_ops/simple_select_cpu"]
-#[no_mangle]
-fn simple_select_cpu(p: &TaskRef, prev_cpu: i32, wake_flags: u64) -> i32 {
-    let mut is_idle = false;
-    let cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &mut is_idle);
-    if is_idle {
-        stat_inc("local");
-        scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
-    }
-    cpu
+#[repr(C)]
+#[allow(dead_code)]
+struct ScxExitInfo { /* opaque */ }
+
+macro_rules! bpf_prog {
+    ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? {$($t:tt)*}) => {
+        #[link_section = $section]
+        #[no_mangle]
+        extern "C" fn $name(_ctx: *const u64) -> i32 {
+            let mut _i = 0usize;
+            $(
+                #[allow(unused_assignments)]
+                let $arg = { let v = unsafe { *_ctx.add(_i) } as $ty; _i += 1; v };
+            )*
+            { $($t)* };
+            0
+        }
+    };
 }
 
-#[link_section = "struct_ops/simple_enqueue"]
-#[no_mangle]
-fn simple_enqueue(p: &TaskRef, enq_flags: u64) {
+bpf_prog!("struct_ops/simple_select_cpu",
+fn simple_select_cpu(p: *mut task_struct, prev_cpu: i32, wake_flags: u64) -> i32 {
+    let p = TaskRef(p);
+    let mut is_idle = false;
+    let cpu = scx_bpf_select_cpu_dfl(&p, prev_cpu, wake_flags, &mut is_idle);
+    if is_idle {
+        stat_inc("local");
+        scx_bpf_dsq_insert(&p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+    }
+    cpu
+});
+
+bpf_prog!("struct_ops/simple_enqueue",
+fn simple_enqueue(p: *mut task_struct, enq_flags: u64) {
+    let p = TaskRef(p);
     stat_inc("global");
     let vtime = p.scx().dsq_vtime;
 
-    // dyn Trait dispatch -- PTR_TO_FUNC via vtable
     let policy: &dyn SchedPolicy = if FIFO_SCHED.load(Relaxed) {
         &FifoPolicy
     } else {
         &VtimePolicy
     };
-    policy.enqueue(p, vtime, enq_flags);
-}
+    policy.enqueue(&p, vtime, enq_flags);
+});
 
-#[link_section = "struct_ops/simple_dispatch"]
-#[no_mangle]
-fn simple_dispatch(_cpu: i32, _prev: &TaskRef) {
+bpf_prog!("struct_ops/simple_dispatch",
+fn simple_dispatch(_cpu: i32, _prev: *mut task_struct) {
     scx_bpf_dsq_move_to_local(SHARED_DSQ);
-}
+});
 
-#[link_section = "struct_ops/simple_running"]
-#[no_mangle]
-fn simple_running(p: &TaskRef) {
+bpf_prog!("struct_ops/simple_running",
+fn simple_running(p: *mut task_struct) {
+    let p = TaskRef(p);
     if FIFO_SCHED.load(Relaxed) {
-        return;
+        return 0;
     }
-    // Global vtime always progresses forward as tasks start executing.
-    // The test and update can be racy across CPUs. Any error should be
-    // contained and temporary.
     let vtime = p.scx().dsq_vtime;
     if VTIME_NOW.load(Relaxed) < vtime {
         VTIME_NOW.store(vtime, Relaxed);
     }
-}
+});
 
-#[link_section = "struct_ops/simple_stopping"]
-#[no_mangle]
-fn simple_stopping(p: &TaskRef, _runnable: bool) {
+bpf_prog!("struct_ops/simple_stopping",
+fn simple_stopping(p: *mut task_struct, _runnable: u64) {
+    let p = TaskRef(p);
     if FIFO_SCHED.load(Relaxed) {
-        return;
+        return 0;
     }
-    // Charge vtime: scale execution time by inverse of weight
     let scx = p.scx_mut();
     let delta = (SCX_SLICE_DFL - scx.slice) * 100 / scx.weight as u64;
     scx.dsq_vtime += delta;
-}
+});
 
-#[link_section = "struct_ops/simple_enable"]
-#[no_mangle]
-fn simple_enable(p: &TaskRef) {
+bpf_prog!("struct_ops/simple_enable",
+fn simple_enable(p: *mut task_struct) {
+    let p = TaskRef(p);
     p.scx_mut().dsq_vtime = VTIME_NOW.load(Relaxed);
-}
+});
 
-#[link_section = "struct_ops/simple_init"]
-#[no_mangle]
+bpf_prog!("struct_ops/simple_init",
 fn simple_init() -> i32 {
-    // Heap-allocated BTreeMap -- backed by bpf_alloc
     let stats = unsafe { &mut *STATS.0.get() };
     *stats = Some(BTreeMap::new());
-
     scx_bpf_create_dsq(SHARED_DSQ, -1)
-}
+});
 
-#[repr(C)]
-struct ScxExitInfo { /* opaque */ }
-
-#[link_section = "struct_ops/simple_exit"]
-#[no_mangle]
-fn simple_exit(_ei: &ScxExitInfo) {}
+bpf_prog!("struct_ops/simple_exit",
+fn simple_exit(_ei: *const ScxExitInfo) {
+});
 
 extern "C" {
     fn bpf_throw(cookie: u64) -> !;
@@ -249,21 +259,8 @@ fn oom(_: Layout) -> ! {
 }
 
 // -- struct_ops map definition --
-// libbpf requires function pointer types (not *const ()) for struct_ops
-// relocations. Use a union to reinterpret fn item pointers as a common
-// extern "C" fn() type in const context.
 
-// libbpf requires function pointer types for struct_ops relocations.
-// Use a union to reinterpret fn item pointers as a common extern "C"
-// fn() type in const context.
-
-type OpFn = unsafe extern "C" fn();
-
-#[repr(C)]
-union FnPtr {
-    rust: *const (),
-    op: OpFn,
-}
+type OpFn = extern "C" fn(*const u64) -> i32;
 
 #[repr(C)]
 struct sched_ext_ops {
@@ -280,10 +277,6 @@ struct sched_ext_ops {
 
 unsafe impl Sync for sched_ext_ops {}
 
-const fn as_op(f: *const ()) -> OpFn {
-    unsafe { FnPtr { rust: f }.op }
-}
-
 const fn pad_name<const N: usize>(s: &[u8; N]) -> [u8; 128] {
     let mut buf = [0u8; 128];
     let mut i = 0;
@@ -297,14 +290,14 @@ const fn pad_name<const N: usize>(s: &[u8; N]) -> [u8; 128] {
 #[link_section = ".struct_ops.link"]
 #[no_mangle]
 static simple_ops: sched_ext_ops = sched_ext_ops {
-    select_cpu: as_op(simple_select_cpu as *const ()),
-    enqueue: as_op(simple_enqueue as *const ()),
-    dispatch: as_op(simple_dispatch as *const ()),
-    running: as_op(simple_running as *const ()),
-    stopping: as_op(simple_stopping as *const ()),
-    enable: as_op(simple_enable as *const ()),
-    init: as_op(simple_init as *const ()),
-    exit: as_op(simple_exit as *const ()),
+    select_cpu: simple_select_cpu,
+    enqueue: simple_enqueue,
+    dispatch: simple_dispatch,
+    running: simple_running,
+    stopping: simple_stopping,
+    enable: simple_enable,
+    init: simple_init,
+    exit: simple_exit,
     name: pad_name(b"simple"),
 };
 

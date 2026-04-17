@@ -5,6 +5,7 @@
 # Usage: make
 
 BLDDIR := $(CURDIR)/bld
+CLANG := /w/llvm/llvm/bld/install/bin/clang
 LLC := /w/llvm/llvm/bld/install/bin/llc
 OPT := /w/llvm/llvm/bld/install/bin/opt
 LLVM_LINK := /w/llvm/llvm/bld/install/bin/llvm-link
@@ -56,6 +57,15 @@ $(DEPDIR)/multi3.bc: $(CURDIR)/multi3.ll
 	@mkdir -p $(DEPDIR)
 	$(LLVM_AS) $< -o $@
 
+# --- CO-RE accessor shims (auto-generated, compiled with clang) ---
+$(BLDDIR)/core_defs.c: $(wildcard $(CURDIR)/*.rs) $(CURDIR)/gen_core.py
+	@mkdir -p $(BLDDIR)
+	python3 $(CURDIR)/gen_core.py $(wildcard $(CURDIR)/*.rs) -o $@
+
+$(DEPDIR)/core_defs.bc: $(BLDDIR)/core_defs.c
+	@mkdir -p $(DEPDIR)
+	$(CLANG) -O2 -g -target bpf -emit-llvm -c $< -o $@
+
 # --- Build BPF program bitcode ---
 $(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib
 	@mkdir -p $(BLDDIR)
@@ -76,14 +86,14 @@ $(DEPDIR)/extracted: $(DEPDIR)/libcore.rlib $(DEPDIR)/libcompiler_builtins.rlib 
 	@touch $@
 
 # --- Link all bitcode ---
-$(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc
+$(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc $(DEPDIR)/core_defs.bc
 	@cp $< $@
 	@for i in 1 2 3 4 5; do \
 		$(LLVM_LINK) --only-needed $@ \
 			$$(find $(DEPDIR)/extracted -name '*.rcgu.o') \
 			-o $@.tmp && mv $@.tmp $@; \
 	done
-	@$(LLVM_LINK) $@ $(DEPDIR)/multi3.bc -o $@.tmp && mv $@.tmp $@
+	@$(LLVM_LINK) $@ $(DEPDIR)/multi3.bc $(DEPDIR)/core_defs.bc -o $@.tmp && mv $@.tmp $@
 
 # --- Optimize after linking (inlines trivial functions, DCE) ---
 # Internalize everything except struct_ops entry points and license,

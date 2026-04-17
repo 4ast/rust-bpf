@@ -94,40 +94,74 @@ unsafe impl GlobalAlloc for BpfAllocator {
 #[global_allocator]
 static ALLOC: BpfAllocator = BpfAllocator;
 
-// ── Kernel types (CO-RE relocates field offsets) ─────────────────────
+// ── Kernel types (CO-RE relocates field offsets at load time) ────────
+//
+// Structs are opaque — no Rust field layout. All field access goes through
+// CO-RE shims compiled by clang (core_defs.c) which carry
+// preserve_access_index relocations. The macros below hide the extern calls.
+//
+// gen_core.py reads the @core_struct blocks below to auto-generate core_defs.c.
+//
+// @core_struct sched_ext_entity {
+//     dsq_vtime: unsigned long long,
+//     slice: unsigned long long,
+//     weight: unsigned int,
+//     flags: unsigned int,
+// }
+// @core_struct task_struct {
+//     scx: sched_ext_entity,
+//     pid: unsigned int,
+//     flags: unsigned int,
+//     nr_cpus_allowed: unsigned int,
+//     mm: unsigned long long,
+//     cpus_ptr: const void *,
+// }
 
 #[repr(C)]
-struct task_struct {
-    scx: sched_ext_entity,
-    pid: u32,
-    flags: u32,
-    nr_cpus_allowed: u32,
-    mm: u64,
-    cpus_ptr: *const u64, // cpumask pointer
+struct task_struct { _opaque: [u8; 0] }
+
+// Macros to generate CO-RE accessor methods. Each expands to an extern "C"
+// declaration + a one-liner method that calls the shim. The shim naming
+// convention matches core_defs.c.
+macro_rules! core_read {
+    ($field:ident -> $ret:ty, $shim:ident) => {
+        fn $field(&self) -> $ret {
+            extern "C" { fn $shim(p: *const u8) -> $ret; }
+            unsafe { $shim(self.0 as *const u8) }
+        }
+    };
 }
 
-#[repr(C)]
-struct sched_ext_entity {
-    dsq_vtime: u64,
-    slice: u64,
-    weight: u32,
-    flags: u32,
+macro_rules! core_write {
+    ($method:ident($val:ty), $shim:ident) => {
+        fn $method(&self, v: $val) {
+            extern "C" { fn $shim(p: *mut u8, v: $val); }
+            unsafe { $shim(self.0 as *mut u8, v) }
+        }
+    };
 }
 
 #[repr(transparent)]
 struct TaskRef(*mut task_struct);
 
 impl TaskRef {
-    fn scx(&self) -> &sched_ext_entity { unsafe { &(*self.0).scx } }
-    fn scx_mut(&self) -> &mut sched_ext_entity { unsafe { &mut (*self.0).scx } }
-    fn pid(&self) -> u32 { unsafe { (*self.0).pid } }
-    fn flags(&self) -> u32 { unsafe { (*self.0).flags } }
-    fn mm(&self) -> u64 { unsafe { (*self.0).mm } }
-    fn cpus_ptr(&self) -> *const u64 { unsafe { (*self.0).cpus_ptr } }
+    core_read!(pid -> u32, __core_read_task_struct__pid);
+    core_read!(flags -> u32, __core_read_task_struct__flags);
+    core_read!(nr_cpus_allowed -> u32, __core_read_task_struct__nr_cpus_allowed);
+    core_read!(mm -> u64, __core_read_task_struct__mm);
+    core_read!(cpus_ptr -> *const u64, __core_read_task_struct__cpus_ptr);
+
+    core_read!(scx_dsq_vtime -> u64, __core_read_task_struct__scx__dsq_vtime);
+    core_read!(scx_slice -> u64, __core_read_task_struct__scx__slice);
+    core_read!(scx_weight -> u32, __core_read_task_struct__scx__weight);
+    core_read!(scx_flags -> u32, __core_read_task_struct__scx__flags);
+
+    core_write!(set_scx_dsq_vtime(u64), __core_write_task_struct__scx__dsq_vtime);
+    core_write!(set_scx_slice(u64), __core_write_task_struct__scx__slice);
+
     fn cpu(&self) -> i32 { unsafe { scx_bpf_task_cpu(self.0) } }
     fn is_running(&self) -> bool { unsafe { scx_bpf_task_running(self.0) } }
-    fn nr_cpus_allowed(&self) -> u32 { unsafe { (*self.0).nr_cpus_allowed } }
-    fn is_queued(&self) -> bool { self.scx().flags & SCX_TASK_QUEUED != 0 }
+    fn is_queued(&self) -> bool { self.scx_flags() & SCX_TASK_QUEUED != 0 }
     fn is_pcpu(&self) -> bool { self.nr_cpus_allowed() == 1 }
     fn cpu_allowed(&self, cpu: i32) -> bool {
         unsafe { bpf_cpumask_test_cpu(cpu, self.cpus_ptr()) }
@@ -312,12 +346,12 @@ fn update_freq(freq: u64, interval: u64) -> u64 {
 }
 
 fn scale_by_weight(p: &TaskRef, val: u64) -> u64 {
-    let w = p.scx().weight as u64;
+    let w = p.scx_weight() as u64;
     if w == 0 { val } else { val * w / 100 }
 }
 
 fn scale_by_weight_inverse(p: &TaskRef, val: u64) -> u64 {
-    let w = p.scx().weight as u64;
+    let w = p.scx_weight() as u64;
     if w == 0 { val } else { val * 100 / w }
 }
 
@@ -442,10 +476,10 @@ fn task_deadline(p: &TaskRef, tctx: &TaskCtx) -> u64 {
     let vsleep_max = scale_by_weight(p, slice_lag() * lag_scale);
     let vtime_min = vtime_now.wrapping_sub(vsleep_max);
 
-    let mut vtime = p.scx().dsq_vtime;
+    let mut vtime = p.scx_dsq_vtime();
     if time_before(vtime, vtime_min) {
         vtime = vtime_min;
-        p.scx_mut().dsq_vtime = vtime_min;
+        p.set_scx_dsq_vtime(vtime_min);
     }
 
     vtime + scale_by_weight_inverse(p, tctx.exec_runtime)
@@ -733,7 +767,7 @@ fn cosmos_tick(p: *mut task_struct) {
         };
 
         if smt_contention || (is_cpu_busy(cpu) && cpu_busy) {
-            p.scx_mut().slice = 0;
+            p.set_scx_slice(0);
         }
     }
 });
@@ -834,7 +868,7 @@ fn cosmos_dispatch(cpu: i32, prev: *mut task_struct) {
     }
 
     if keep_running(prev, cpu) {
-        prev.scx_mut().slice = task_slice(prev);
+        prev.set_scx_slice(task_slice(prev));
     }
 });
 
@@ -867,8 +901,8 @@ fn cosmos_running(p: *mut task_struct) {
 
     tctx.last_run_at = now();
 
-    if time_before(VTIME_NOW.load(Relaxed), p.scx().dsq_vtime) {
-        VTIME_NOW.store(p.scx().dsq_vtime, Relaxed);
+    if time_before(VTIME_NOW.load(Relaxed), p.scx_dsq_vtime()) {
+        VTIME_NOW.store(p.scx_dsq_vtime(), Relaxed);
     }
 
     update_cpufreq(p.cpu());
@@ -891,7 +925,7 @@ fn cosmos_stopping(p: *mut task_struct, _runnable: u64) {
     let slice = now() - tctx.last_run_at;
     let scaled = scale_by_cpu_capacity(slice, cpu);
 
-    p.scx_mut().dsq_vtime += scale_by_weight_inverse(p, scaled);
+    p.set_scx_dsq_vtime(p.scx_dsq_vtime() + scale_by_weight_inverse(p, scaled));
     tctx.exec_runtime = min(tctx.exec_runtime + scaled, slice_lag());
 
     update_cpu_load(p, scaled);
@@ -900,7 +934,7 @@ fn cosmos_stopping(p: *mut task_struct, _runnable: u64) {
 bpf_prog!("struct_ops/cosmos_enable",
 fn cosmos_enable(p: *mut task_struct) {
     let p = TaskRef(p);
-    p.scx_mut().dsq_vtime = VTIME_NOW.load(Relaxed);
+    p.set_scx_dsq_vtime(VTIME_NOW.load(Relaxed));
 });
 
 bpf_prog!("struct_ops/cosmos_init_task",

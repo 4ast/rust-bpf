@@ -61,28 +61,50 @@ unsafe impl GlobalAlloc for BpfAllocator {
 #[global_allocator]
 static ALLOC: BpfAllocator = BpfAllocator;
 
-// -- task_struct with BTF-described layout (CO-RE relocates field offsets) --
+// -- kernel types (CO-RE relocates field offsets at load time) --
+//
+// gen_core.py reads these @core_struct blocks to auto-generate core_defs.c.
+//
+// @core_struct sched_ext_entity {
+//     dsq_vtime: unsigned long long,
+//     slice: unsigned long long,
+//     weight: unsigned int,
+// }
+// @core_struct task_struct {
+//     scx: sched_ext_entity,
+// }
 
 #[repr(C)]
-struct task_struct {
-    // ... other fields omitted, CO-RE relocates accesses ...
-    scx: sched_ext_entity,
+struct task_struct { _opaque: [u8; 0] }
+
+macro_rules! core_read {
+    ($field:ident -> $ret:ty, $shim:ident) => {
+        fn $field(&self) -> $ret {
+            extern "C" { fn $shim(p: *const u8) -> $ret; }
+            unsafe { $shim(self.0 as *const u8) }
+        }
+    };
 }
 
-#[repr(C)]
-struct sched_ext_entity {
-    dsq_vtime: u64,
-    slice: u64,
-    weight: u32,
-    // ... other fields ...
+macro_rules! core_write {
+    ($method:ident($val:ty), $shim:ident) => {
+        fn $method(&self, v: $val) {
+            extern "C" { fn $shim(p: *mut u8, v: $val); }
+            unsafe { $shim(self.0 as *mut u8, v) }
+        }
+    };
 }
 
 #[repr(transparent)]
 struct TaskRef(*mut task_struct);
 
 impl TaskRef {
-    fn scx(&self) -> &sched_ext_entity { unsafe { &(*self.0).scx } }
-    fn scx_mut(&self) -> &mut sched_ext_entity { unsafe { &mut (*self.0).scx } }
+    core_read!(scx_dsq_vtime -> u64, __core_read_task_struct__scx__dsq_vtime);
+    core_read!(scx_slice -> u64, __core_read_task_struct__scx__slice);
+    core_read!(scx_weight -> u32, __core_read_task_struct__scx__weight);
+
+    core_write!(set_scx_dsq_vtime(u64), __core_write_task_struct__scx__dsq_vtime);
+    core_write!(set_scx_slice(u64), __core_write_task_struct__scx__slice);
 }
 
 const SHARED_DSQ: u64 = 0;
@@ -173,7 +195,7 @@ bpf_prog!("struct_ops/simple_enqueue",
 fn simple_enqueue(p: *mut task_struct, enq_flags: u64) {
     let p = TaskRef(p);
     stat_inc("global");
-    let vtime = p.scx().dsq_vtime;
+    let vtime = p.scx_dsq_vtime();
 
     let policy: &dyn SchedPolicy = if FIFO_SCHED.load(Relaxed) {
         &FifoPolicy
@@ -194,7 +216,7 @@ fn simple_running(p: *mut task_struct) {
     if FIFO_SCHED.load(Relaxed) {
         return 0;
     }
-    let vtime = p.scx().dsq_vtime;
+    let vtime = p.scx_dsq_vtime();
     if VTIME_NOW.load(Relaxed) < vtime {
         VTIME_NOW.store(vtime, Relaxed);
     }
@@ -206,15 +228,14 @@ fn simple_stopping(p: *mut task_struct, _runnable: u64) {
     if FIFO_SCHED.load(Relaxed) {
         return 0;
     }
-    let scx = p.scx_mut();
-    let delta = (SCX_SLICE_DFL - scx.slice) * 100 / scx.weight as u64;
-    scx.dsq_vtime += delta;
+    let delta = (SCX_SLICE_DFL - p.scx_slice()) * 100 / p.scx_weight() as u64;
+    p.set_scx_dsq_vtime(p.scx_dsq_vtime() + delta);
 });
 
 bpf_prog!("struct_ops/simple_enable",
 fn simple_enable(p: *mut task_struct) {
     let p = TaskRef(p);
-    p.scx_mut().dsq_vtime = VTIME_NOW.load(Relaxed);
+    p.set_scx_dsq_vtime(VTIME_NOW.load(Relaxed));
 });
 
 bpf_prog!("struct_ops/simple_init",

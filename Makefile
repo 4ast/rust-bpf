@@ -9,6 +9,7 @@ LLC := /w/llvm/llvm/bld/install/bin/llc
 OPT := /w/llvm/llvm/bld/install/bin/opt
 LLVM_LINK := /w/llvm/llvm/bld/install/bin/llvm-link
 LLVM_AS := /w/llvm/llvm/bld/install/bin/llvm-as
+LLVM_DIS := /w/llvm/llvm/bld/install/bin/llvm-dis
 TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 DEPDIR := $(BLDDIR)/deps
 RUST_SRC := /usr/lib/rustlib/src/rust/library
@@ -100,13 +101,25 @@ $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-linked.bc
 	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold \
 		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@
 
+# --- Add section ".ksyms" to extern function declarations ---
+$(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc
+	$(LLVM_DIS) $< -o $@.ll
+	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(LLVM_AS) $@.ll -o $@
+	@rm -f $@.ll
+
 # --- Final BPF object ---
-$(BLDDIR)/%.o: $(BLDDIR)/%-opt.bc
-	$(LLC) -march=bpfel -mcpu=v4 -filetype=obj -o $@ $<
+$(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
+	$(LLC) -march=bpfel -mcpu=v4 -filetype=obj -o $@.tmp $<
+	/w/llvm/llvm/bld/install/bin/llvm-objcopy \
+		--remove-section=.eh_frame --remove-section=.rel.eh_frame \
+		--remove-section=.gcc_except_table \
+		--strip-symbol=rust_eh_personality $@.tmp $@
+	@rm -f $@.tmp
 
 clean:
 	rm -rf $(BLDDIR)
 
-.PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-opt.bc
+.PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
 
 .PHONY: all clean

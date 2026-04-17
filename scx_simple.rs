@@ -248,6 +248,40 @@ fn oom(_: Layout) -> ! {
     unsafe { bpf_throw(12) } // ENOMEM
 }
 
+// -- struct_ops map definition --
+// libbpf matches fields by name via BTF, not by type.
+// Use Option<fn()> as an opaque function pointer — the actual
+// signatures live on the callbacks themselves.
+
+#[repr(C)]
+struct sched_ext_ops {
+    select_cpu: *const (),
+    enqueue: *const (),
+    dispatch: *const (),
+    running: *const (),
+    stopping: *const (),
+    enable: *const (),
+    init: *const (),
+    exit: *const (),
+    name: [u8; 7],
+}
+
+unsafe impl Sync for sched_ext_ops {}
+
+#[link_section = ".struct_ops.link"]
+#[no_mangle]
+static simple_ops: sched_ext_ops = sched_ext_ops {
+    select_cpu: simple_select_cpu as *const (),
+    enqueue: simple_enqueue as *const (),
+    dispatch: simple_dispatch as *const (),
+    running: simple_running as *const (),
+    stopping: simple_stopping as *const (),
+    enable: simple_enable as *const (),
+    init: simple_init as *const (),
+    exit: simple_exit as *const (),
+    name: *b"simple\0",
+};
+
 #[link_section = "license"]
 #[no_mangle]
 static _LICENSE: [u8; 4] = *b"GPL\0";

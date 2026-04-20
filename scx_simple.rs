@@ -238,7 +238,7 @@ fn simple_enable(p: *mut task_struct) {
     p.set_scx_dsq_vtime(VTIME_NOW.load(Relaxed));
 });
 
-bpf_prog!("struct_ops/simple_init",
+bpf_prog!("struct_ops.s/simple_init",
 fn simple_init() -> i32 {
     let stats = unsafe { &mut *STATS.0.get() };
     *stats = Some(BTreeMap::new());

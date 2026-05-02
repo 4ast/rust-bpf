@@ -220,8 +220,6 @@ impl CpuCtx {
     }
 }
 
-// ── Cell for mutable statics (BPF is per-CPU, no data races) ─────────
-
 struct BpfCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for BpfCell<T> {}
 
@@ -259,7 +257,7 @@ static NR_EV_STICKY_DISPATCHES: AtomicU64 = AtomicU64::new(0);
 static NR_GPU_DISPATCHES: AtomicU64 = AtomicU64::new(0);
 
 // replaces BPF_MAP_TYPE_TASK_STORAGE
-static TASK_CTXS: BpfCell<Option<BTreeMap<u32, TaskCtx>>> =
+static TASK_CTXS: BpfCell<Option<BTreeMap<u32, UnsafeCell<TaskCtx>>>> =
     BpfCell(UnsafeCell::new(None));
 // replaces BPF_MAP_TYPE_PERCPU_ARRAY cpu_ctx_stor
 static CPU_CTXS: BpfCell<[CpuCtx; MAX_CPUS]> =
@@ -301,8 +299,9 @@ fn time_delta(a: u64, b: u64) -> u64 { a.wrapping_sub(b) }
 fn is_wakeup(wake_flags: u64) -> bool { wake_flags & SCX_WAKE_TTWU != 0 }
 
 fn get_task_ctx(pid: u32) -> Option<&'static mut TaskCtx> {
-    let ctxs = unsafe { &mut *TASK_CTXS.0.get() };
-    ctxs.as_mut()?.get_mut(&pid)
+    let ctxs = unsafe { &*TASK_CTXS.0.get() };
+    let cell = ctxs.as_ref()?.get(&pid)?;
+    Some(unsafe { &mut *cell.get() })
 }
 
 fn get_cpu_ctx(cpu: i32) -> Option<&'static mut CpuCtx> {
@@ -965,7 +964,7 @@ fn cosmos_init_task(p: *mut task_struct) -> i32 {
     let p = TaskRef(p);
     let ctxs = unsafe { &mut *TASK_CTXS.0.get() };
     if let Some(map) = ctxs {
-        map.insert(p.pid(), TaskCtx::new());
+        map.insert(p.pid(), UnsafeCell::new(TaskCtx::new()));
     }
     0
 });

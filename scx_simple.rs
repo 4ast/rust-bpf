@@ -114,11 +114,10 @@ const SCX_SLICE_DFL: u64 = 20_000_000; // 20ms in ns
 static FIFO_SCHED: AtomicBool = AtomicBool::new(false);
 static VTIME_NOW: AtomicU64 = AtomicU64::new(0);
 
-// BPF runs single-threaded per-CPU, so UnsafeCell is safe here.
 struct BpfCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for BpfCell<T> {}
 
-static STATS: BpfCell<Option<BTreeMap<&str, u64>>> = BpfCell(UnsafeCell::new(None));
+static STATS: BpfCell<Option<BTreeMap<&str, AtomicU64>>> = BpfCell(UnsafeCell::new(None));
 
 // -- scheduling policy as a trait --
 
@@ -149,10 +148,8 @@ impl SchedPolicy for VtimePolicy {
 }
 
 fn stat_inc(key: &'static str) {
-    let stats = unsafe { &mut *STATS.0.get() };
-    if let Some(map) = stats {
-        *map.entry(key).or_insert(0) += 1;
-    }
+    let stats = unsafe { &*STATS.0.get() };
+    stats.as_ref().unwrap().get(key).unwrap().fetch_add(1, Relaxed);
 }
 
 // -- struct_ops callbacks --
@@ -241,7 +238,10 @@ fn simple_enable(p: *mut task_struct) {
 bpf_prog!("struct_ops.s/simple_init",
 fn simple_init() -> i32 {
     let stats = unsafe { &mut *STATS.0.get() };
-    *stats = Some(BTreeMap::new());
+    let mut map = BTreeMap::new();
+    map.insert("local", AtomicU64::new(0));
+    map.insert("global", AtomicU64::new(0));
+    *stats = Some(map);
     scx_bpf_create_dsq(SHARED_DSQ, -1)
 });
 

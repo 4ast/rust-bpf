@@ -12,12 +12,17 @@ LLVM_LINK := /w/llvm/llvm/bld/install/bin/llvm-link
 LLVM_AS := /w/llvm/llvm/bld/install/bin/llvm-as
 LLVM_DIS := /w/llvm/llvm/bld/install/bin/llvm-dis
 TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
-DEPDIR := $(BLDDIR)/deps
-RUST_SRC := /usr/lib/rustlib/src/rust/library
+# Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
+# builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
+DEPDIR := $(CURDIR)/bld_deps
+# System rustc + /usr/lib/rustlib/src can be mismatched (RHEL packaging splits
+# the compiler and source versions). Default to the locally-built toolchain
+# under /w/rust, overridable via env or `make RUSTC=... RUST_SRC=...`.
+RUSTC ?= /w/rust/build/x86_64-unknown-linux-gnu/stage1/bin/rustc
+RUST_SRC ?= /w/rust/library
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
-RUSTC := rustc
-RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options
+RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=64
 
 PROGS := scx_simple scx_cosmos
 
@@ -139,6 +144,9 @@ $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
 clean:
 	rm -rf $(BLDDIR)
 
+distclean: clean
+	rm -rf $(DEPDIR)
+
 .PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
 
-.PHONY: all clean
+.PHONY: all clean distclean

@@ -20,9 +20,14 @@ DEPDIR := $(CURDIR)/bld_deps
 # under /w/rust, overridable via env or `make RUSTC=... RUST_SRC=...`.
 RUSTC ?= /w/rust/build/x86_64-unknown-linux-gnu/stage1/bin/rustc
 RUST_SRC ?= /w/rust/library
+CARGO ?= cargo
+LLVM_PREFIX ?= /w/llvm/llvm/bld/install
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
 RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=64
+
+# Host triple for proc-macro and bpf-postproc builds (default to current).
+HOST_TRIPLE ?= x86_64-unknown-linux-gnu
 
 PROGS := scx_simple scx_cosmos
 
@@ -62,20 +67,42 @@ $(DEPDIR)/multi3.bc: $(CURDIR)/multi3.ll
 	@mkdir -p $(DEPDIR)
 	$(LLVM_AS) $< -o $@
 
-# --- CO-RE accessor shims (auto-generated, compiled with clang) ---
-$(BLDDIR)/core_defs.c: $(wildcard $(CURDIR)/*.rs) $(CURDIR)/gen_core.py
-	@mkdir -p $(BLDDIR)
-	python3 $(CURDIR)/gen_core.py $(wildcard $(CURDIR)/*.rs) -o $@
-
-$(DEPDIR)/core_defs.bc: $(BLDDIR)/core_defs.c
+# --- btf runtime crate (no_std, BPF target) ---
+$(DEPDIR)/libbtf.rlib: $(CURDIR)/btf/src/lib.rs $(DEPDIR)/libcore.rlib
 	@mkdir -p $(DEPDIR)
-	$(CLANG) -O2 -g -target bpf -emit-llvm -c $< -o $@
+	$(RUSTFLAGS_ENV) $(RUSTC) --edition 2024 --crate-type rlib $(RUSTC_COMMON) \
+		--sysroot=/dev/null -L$(DEPDIR) \
+		--crate-name btf \
+		--emit=link=$@ --emit=metadata=$(DEPDIR)/libbtf.rmeta \
+		$<
+
+# --- btf-macros proc-macro crate (host) ---
+# Built via cargo because it depends on syn/quote/proc-macro2. Proc-macro
+# crates are always host-targeted; rustc loads the resulting .so when
+# expanding `#[btf]` in BPF-target builds.
+$(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/btf-macros/Cargo.toml
+	cd $(CURDIR)/btf-macros && RUSTC=$(RUSTC) $(CARGO) build --release
+	@mkdir -p $(BLDDIR)
+	cp $(CURDIR)/btf-macros/target/release/libbtf_macros.so $@
+
+# --- bpf-postproc tool (host) ---
+# Lowers __btf_field_byte_offset / __btf_field_exists polyfills into
+# llvm.preserve.struct.access.index chains + llvm.bpf.preserve.field.info
+# calls so the BPF backend emits CO-RE relocations.
+$(BLDDIR)/bpf-postproc: $(wildcard $(CURDIR)/bpf-postproc/src/*.rs) $(CURDIR)/bpf-postproc/Cargo.toml
+	cd $(CURDIR)/bpf-postproc && \
+		LLVM_SYS_220_PREFIX=$(LLVM_PREFIX) \
+		$(CARGO) build --release
+	@mkdir -p $(BLDDIR)
+	cp $(CURDIR)/bpf-postproc/target/release/bpf-postproc $@
 
 # --- Build BPF program bitcode ---
-$(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib
+$(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib $(DEPDIR)/libbtf.rlib $(BLDDIR)/libbtf_macros.so
 	@mkdir -p $(BLDDIR)
 	$(RUSTFLAGS_ENV) $(RUSTC) --edition 2021 --crate-type rlib $(RUSTC_COMMON) \
 		--sysroot=/dev/null -L$(DEPDIR) \
+		--extern btf=$(DEPDIR)/libbtf.rlib \
+		--extern btf_macros=$(BLDDIR)/libbtf_macros.so \
 		-Zcrate-attr='feature(alloc_error_handler)' \
 		--crate-name $(basename $(notdir $<)) \
 		--emit=llvm-bc -o $@ $<
@@ -91,14 +118,18 @@ $(DEPDIR)/extracted: $(DEPDIR)/libcore.rlib $(DEPDIR)/libcompiler_builtins.rlib 
 	@touch $@
 
 # --- Link all bitcode ---
-$(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc $(DEPDIR)/core_defs.bc
+$(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc
 	@cp $< $@
 	@for i in 1 2 3 4 5; do \
 		$(LLVM_LINK) --only-needed $@ \
 			$$(find $(DEPDIR)/extracted -name '*.rcgu.o') \
 			-o $@.tmp && mv $@.tmp $@; \
 	done
-	@$(LLVM_LINK) $@ $(DEPDIR)/multi3.bc $(DEPDIR)/core_defs.bc -o $@.tmp && mv $@.tmp $@
+	@$(LLVM_LINK) $@ $(DEPDIR)/multi3.bc -o $@.tmp && mv $@.tmp $@
+
+# --- Lower btf polyfills to CO-RE relocations ---
+$(BLDDIR)/%-reloc.bc: $(BLDDIR)/%-linked.bc $(BLDDIR)/bpf-postproc
+	$(BLDDIR)/bpf-postproc $< $@
 
 # --- Optimize after linking (inlines trivial functions, DCE) ---
 # Internalize everything except struct_ops entry points and license,
@@ -114,7 +145,7 @@ KEEP_SYMS := simple_ops \
              cosmos_init cosmos_exit \
              _LICENSE
 INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list=$(s))
-$(BLDDIR)/%-opt.bc: $(BLDDIR)/%-linked.bc
+$(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
 	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold \
 		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@
 
@@ -147,6 +178,6 @@ clean:
 distclean: clean
 	rm -rf $(DEPDIR)
 
-.PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
+.PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-reloc.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
 
 .PHONY: all clean distclean

@@ -21,6 +21,8 @@ use core::cell::UnsafeCell;
 use core::cmp::{max, min};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
+use btf_macros::btf;
+
 // ── Constants ────────────────────────────────────────────────────────
 
 const MAX_CPUS: usize = 1024;
@@ -115,68 +117,57 @@ static ALLOC: BpfAllocator = BpfAllocator;
 
 // ── Kernel types (CO-RE relocates field offsets at load time) ────────
 //
-// Structs are opaque — no Rust field layout. All field access goes through
-// CO-RE shims compiled by clang (core_defs.c) which carry
-// preserve_access_index relocations. The macros below hide the extern calls.
+// #[btf] declares the kernel fields this program inspects. The schema
+// is partial: only the accessed members are listed. bpf-linker matches
+// each declared path against the target-kernel BTF and emits standard
+// .BTF.ext CO-RE relocation records consumed by the loader.
 //
-// gen_core.py reads the @core_struct blocks below to auto-generate core_defs.c.
-//
-// @core_struct sched_ext_entity {
-//     dsq_vtime: unsigned long long,
-//     slice: unsigned long long,
-//     weight: unsigned int,
-//     flags: unsigned int,
-// }
-// @core_struct task_struct {
-//     scx: sched_ext_entity,
-//     pid: unsigned int,
-//     flags: unsigned int,
-//     nr_cpus_allowed: unsigned int,
-//     mm: unsigned long long,
-//     cpus_ptr: const void *,
-// }
+// `mm` and `cpus_ptr` are kernel pointer fields. CO-RE's field-offset
+// compatibility check rejects int↔ptr type mismatches, so they must be
+// declared as pointers (matching the original C shim's `const void *`)
+// rather than u64.
 
-#[repr(C)]
-struct task_struct { _opaque: [u8; 0] }
-
-// Macros to generate CO-RE accessor methods. Each expands to an extern "C"
-// declaration + a one-liner method that calls the shim. The shim naming
-// convention matches core_defs.c.
-macro_rules! core_read {
-    ($field:ident -> $ret:ty, $shim:ident) => {
-        fn $field(&self) -> $ret {
-            extern "C" { fn $shim(p: *const u8) -> $ret; }
-            unsafe { $shim(self.0 as *const u8) }
-        }
-    };
+#[btf]
+struct sched_ext_entity {
+    dsq_vtime: u64,
+    slice: u64,
+    weight: u32,
+    flags: u32,
 }
 
-macro_rules! core_write {
-    ($method:ident($val:ty), $shim:ident) => {
-        fn $method(&self, v: $val) {
-            extern "C" { fn $shim(p: *mut u8, v: $val); }
-            unsafe { $shim(self.0 as *mut u8, v) }
-        }
-    };
+#[btf]
+struct task_struct {
+    scx: sched_ext_entity,
+    pid: u32,
+    flags: u32,
+    nr_cpus_allowed: u32,
+    mm: *const u8,
+    cpus_ptr: *const u64,
 }
 
 #[repr(transparent)]
 struct TaskRef(*mut task_struct);
 
 impl TaskRef {
-    core_read!(pid -> u32, __core_read_task_struct__pid);
-    core_read!(flags -> u32, __core_read_task_struct__flags);
-    core_read!(nr_cpus_allowed -> u32, __core_read_task_struct__nr_cpus_allowed);
-    core_read!(mm -> u64, __core_read_task_struct__mm);
-    core_read!(cpus_ptr -> *const u64, __core_read_task_struct__cpus_ptr);
+    fn view(&self) -> &task_struct { unsafe { &*self.0 } }
 
-    core_read!(scx_dsq_vtime -> u64, __core_read_task_struct__scx__dsq_vtime);
-    core_read!(scx_slice -> u64, __core_read_task_struct__scx__slice);
-    core_read!(scx_weight -> u32, __core_read_task_struct__scx__weight);
-    core_read!(scx_flags -> u32, __core_read_task_struct__scx__flags);
+    fn pid(&self) -> u32 { *self.view().pid().get().unwrap() }
+    fn flags(&self) -> u32 { *self.view().flags().get().unwrap() }
+    fn nr_cpus_allowed(&self) -> u32 { *self.view().nr_cpus_allowed().get().unwrap() }
+    fn mm(&self) -> u64 { *self.view().mm().get().unwrap() as u64 }
+    fn cpus_ptr(&self) -> *const u64 { *self.view().cpus_ptr().get().unwrap() }
 
-    core_write!(set_scx_dsq_vtime(u64), __core_write_task_struct__scx__dsq_vtime);
-    core_write!(set_scx_slice(u64), __core_write_task_struct__scx__slice);
+    fn scx_dsq_vtime(&self) -> u64 { *self.view().scx().dsq_vtime().get().unwrap() }
+    fn scx_slice(&self) -> u64 { *self.view().scx().slice().get().unwrap() }
+    fn scx_weight(&self) -> u32 { *self.view().scx().weight().get().unwrap() }
+    fn scx_flags(&self) -> u32 { *self.view().scx().flags().get().unwrap() }
+
+    fn set_scx_dsq_vtime(&self, v: u64) {
+        unsafe { *self.view().scx().dsq_vtime().as_mut_ptr() = v; }
+    }
+    fn set_scx_slice(&self, v: u64) {
+        unsafe { *self.view().scx().slice().as_mut_ptr() = v; }
+    }
 
     fn cpu(&self) -> i32 { unsafe { scx_bpf_task_cpu(self.0) } }
     fn is_running(&self) -> bool { unsafe { scx_bpf_task_running(self.0) } }

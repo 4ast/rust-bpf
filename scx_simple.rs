@@ -8,6 +8,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
+use btf_macros::btf;
+
 // -- kfunc bindings (safe: the BPF verifier proves safety) --
 
 extern "C" {
@@ -63,48 +65,38 @@ static ALLOC: BpfAllocator = BpfAllocator;
 
 // -- kernel types (CO-RE relocates field offsets at load time) --
 //
-// gen_core.py reads these @core_struct blocks to auto-generate core_defs.c.
-//
-// @core_struct sched_ext_entity {
-//     dsq_vtime: unsigned long long,
-//     slice: unsigned long long,
-//     weight: unsigned int,
-// }
-// @core_struct task_struct {
-//     scx: sched_ext_entity,
-// }
+// #[btf] declares the kernel fields this program inspects. bpf-linker
+// matches each declared path against the target-kernel BTF and emits
+// standard .BTF.ext CO-RE relocation records.
 
-#[repr(C)]
-struct task_struct { _opaque: [u8; 0] }
-
-macro_rules! core_read {
-    ($field:ident -> $ret:ty, $shim:ident) => {
-        fn $field(&self) -> $ret {
-            extern "C" { fn $shim(p: *const u8) -> $ret; }
-            unsafe { $shim(self.0 as *const u8) }
-        }
-    };
+#[btf]
+struct sched_ext_entity {
+    dsq_vtime: u64,
+    slice: u64,
+    weight: u32,
 }
 
-macro_rules! core_write {
-    ($method:ident($val:ty), $shim:ident) => {
-        fn $method(&self, v: $val) {
-            extern "C" { fn $shim(p: *mut u8, v: $val); }
-            unsafe { $shim(self.0 as *mut u8, v) }
-        }
-    };
+#[btf]
+struct task_struct {
+    scx: sched_ext_entity,
 }
 
 #[repr(transparent)]
 struct TaskRef(*mut task_struct);
 
 impl TaskRef {
-    core_read!(scx_dsq_vtime -> u64, __core_read_task_struct__scx__dsq_vtime);
-    core_read!(scx_slice -> u64, __core_read_task_struct__scx__slice);
-    core_read!(scx_weight -> u32, __core_read_task_struct__scx__weight);
+    fn view(&self) -> &task_struct { unsafe { &*self.0 } }
 
-    core_write!(set_scx_dsq_vtime(u64), __core_write_task_struct__scx__dsq_vtime);
-    core_write!(set_scx_slice(u64), __core_write_task_struct__scx__slice);
+    fn scx_dsq_vtime(&self) -> u64 { *self.view().scx().dsq_vtime().get().unwrap() }
+    fn scx_slice(&self) -> u64 { *self.view().scx().slice().get().unwrap() }
+    fn scx_weight(&self) -> u32 { *self.view().scx().weight().get().unwrap() }
+
+    fn set_scx_dsq_vtime(&self, v: u64) {
+        unsafe { *self.view().scx().dsq_vtime().as_mut_ptr() = v; }
+    }
+    fn set_scx_slice(&self, v: u64) {
+        unsafe { *self.view().scx().slice().as_mut_ptr() = v; }
+    }
 }
 
 const SHARED_DSQ: u64 = 0;

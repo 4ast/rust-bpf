@@ -395,18 +395,26 @@ where
         unsafe { &*field }
     }
 
-    /// Returns a writable raw pointer to the field at its relocated address.
+    /// Returns a raw pointer to the field at its relocated address.
     ///
     /// Emits one `byte_offset` CO-RE relocation; no `exists()` query. The
     /// caller must independently guarantee the field exists (either via a
-    /// prior `exists()` true branch or a profile-backed code path) and that
-    /// the underlying object was originally mutable (e.g., the kernel handed
-    /// out a `*mut`, not a `*const`).
+    /// prior `exists()` true branch or a profile-backed code path).
     #[inline(always)]
-    pub fn as_mut_ptr(&self) -> *mut Value {
+    pub fn as_ptr(&self) -> *const Value {
         let base = self.base.cast::<Root::Carrier>();
         let offset = btf_field_byte_offset(base, core::ptr::null::<Path>()) as usize;
-        unsafe { self.base.cast::<u8>().add(offset) as *mut Value }
+        unsafe { self.base.cast::<u8>().add(offset).cast::<Value>() }
+    }
+
+    /// Returns a writable raw pointer to the field at its relocated address.
+    ///
+    /// Same constraints as [`Self::as_ptr`], plus the underlying object must
+    /// have been originally mutable (e.g., the kernel handed out a `*mut`,
+    /// not a `*const`).
+    #[inline(always)]
+    pub fn as_mut_ptr(&self) -> *mut Value {
+        self.as_ptr() as *mut Value
     }
 }
 
@@ -420,10 +428,10 @@ where
     fn __btf_get<'a, Value, Path>(
         field: &Field<'a, Root, Value, Path, Self>,
     ) -> Self::Result<&'a Value> {
-        if !field.exists() {
-            return None;
-        }
-
+        // Skip the `field_exists` CO-RE relocation: if the field is missing
+        // on the target kernel, the `byte_offset` relocation below will fail
+        // at libbpf load time rather than producing a runtime `None`. Callers
+        // that need real defensive behavior should use a profile witness.
         Some(field.__btf_get_required())
     }
 }

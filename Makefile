@@ -5,12 +5,14 @@
 # Usage: make
 
 BLDDIR := $(CURDIR)/bld
-CLANG := /w/llvm/llvm/bld/install/bin/clang
-LLC := /w/llvm/llvm/bld/install/bin/llc
-OPT := /w/llvm/llvm/bld/install/bin/opt
-LLVM_LINK := /w/llvm/llvm/bld/install/bin/llvm-link
-LLVM_AS := /w/llvm/llvm/bld/install/bin/llvm-as
-LLVM_DIS := /w/llvm/llvm/bld/install/bin/llvm-dis
+LLVM_PREFIX ?= /w/llvm/llvm/bld/install
+CLANG := $(LLVM_PREFIX)/bin/clang
+LLC := $(LLVM_PREFIX)/bin/llc
+OPT := $(LLVM_PREFIX)/bin/opt
+LLVM_LINK := $(LLVM_PREFIX)/bin/llvm-link
+LLVM_AS := $(LLVM_PREFIX)/bin/llvm-as
+LLVM_DIS := $(LLVM_PREFIX)/bin/llvm-dis
+LLVM_OBJCOPY := $(LLVM_PREFIX)/bin/llvm-objcopy
 TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 # Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
 # builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
@@ -21,7 +23,6 @@ DEPDIR := $(CURDIR)/bld_deps
 RUSTC ?= /w/rust/build/x86_64-unknown-linux-gnu/stage1/bin/rustc
 RUST_SRC ?= /w/rust/library
 CARGO ?= cargo
-LLVM_PREFIX ?= /w/llvm/llvm/bld/install
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
 RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=64
@@ -89,9 +90,12 @@ $(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/
 # Lowers __btf_field_byte_offset / __btf_field_exists polyfills into
 # llvm.preserve.struct.access.index chains + llvm.bpf.preserve.field.info
 # calls so the BPF backend emits CO-RE relocations.
+# llvm-sys locates LLVM via llvm-config on PATH (unless a version-specific
+# LLVM_SYS_<ver>_PREFIX env var overrides it), so putting the pinned install
+# first keeps this rule agnostic of the llvm-sys version in Cargo.toml.
 $(BLDDIR)/bpf-postproc: $(wildcard $(CURDIR)/bpf-postproc/src/*.rs) $(CURDIR)/bpf-postproc/Cargo.toml
 	cd $(CURDIR)/bpf-postproc && \
-		LLVM_SYS_220_PREFIX=$(LLVM_PREFIX) \
+		PATH="$(LLVM_PREFIX)/bin:$$PATH" \
 		$(CARGO) build --release
 	@mkdir -p $(BLDDIR)
 	cp $(CURDIR)/bpf-postproc/target/release/bpf-postproc $@
@@ -166,7 +170,7 @@ $(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc
 # --- Final BPF object ---
 $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
 	$(LLC) -march=bpfel -mcpu=v4 -filetype=obj -o $@.tmp $<
-	/w/llvm/llvm/bld/install/bin/llvm-objcopy \
+	$(LLVM_OBJCOPY) \
 		--remove-section=.eh_frame --remove-section=.rel.eh_frame \
 		--remove-section=.gcc_except_table \
 		--strip-symbol=rust_eh_personality $@.tmp $@

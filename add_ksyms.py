@@ -360,6 +360,19 @@ mem_intrinsics = {
     'bpf_arena_memcpy': (r'call void @llvm\.(?:memcpy|memmove)\.p0\.p0\.i64\('
                          r'(ptr[^,]*),\s*(ptr[^,]*),\s*(i64[^,]*),\s*i1[^)]*\)'),
 }
+# llvm.memset is NOT rewritten here: llc expands constant-length memsets
+# inline, and turning them into a bpf_arena_memset kfunc call makes the
+# object fail to load ("extern (func ksym) 'bpf_arena_memset': not found in
+# kernel or module BTFs"). Pipelines that genuinely need a memset helper
+# (rust-selftests/collections, where liballoc emits variable-length ones)
+# lower it themselves BEFORE inlining, against a helper the object defines.
+
+# A module may DEFINE the arena mem helpers itself (as static BPF subprogs,
+# so the verifier checks them per call site with real pointer provenance —
+# see rust-selftests/collections). Never emit or keep external declares for
+# names the module defines; the rewritten calls bind to the local defs.
+defined_syms = set(re.findall(r'^define\s[^\n]*?@([A-Za-z0-9_.$]+)\(',
+                              text, re.MULTILINE))
 
 # Find an attribute group number used by other extern decls.
 attr_match = re.search(r'^declare\s.*#(\d+)\s+section', text, re.MULTILINE)
@@ -373,6 +386,8 @@ for name, pattern in mem_intrinsics.items():
             rf'call void @{name}(\1, \2, \3)',
             text,
         )
+        if name in defined_syms:
+            continue
         decl_line = f'declare void @{name}(ptr, ptr, i64) #{attr_num}'
         subrt = make_proto(name, decl_line)
         dbg_id = alloc_id()
@@ -401,6 +416,17 @@ for old, new in libcall_renames.items():
                   '@' + new, text)
     text = re.sub(r'(!DISubprogram\(name:\s*")' + re.escape(old) + r'"',
                   r'\g<1>' + new + '"', text)
+
+# The renames above can leave a clashing external `declare` for a name the
+# module defines; drop it — the calls bind to the module-local definition.
+def drop_defined_declares(m):
+    name_m = re.search(r'@([A-Za-z0-9_.$]+)\(', m.group(0))
+    if name_m and name_m.group(1) in defined_syms:
+        return ''
+    return m.group(0)
+# a declare may carry its section tag on a continuation line
+text = re.sub(r'^declare\s[^\n]*\n(?:[ \t]+section[^\n]*\n)?',
+              drop_defined_declares, text, flags=re.MULTILINE)
 
 # LLC lowers 'resume' instructions to calls to _Unwind_Resume.
 # Replace resume with a direct call so BTF/.ksyms picks it up.

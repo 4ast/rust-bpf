@@ -417,6 +417,28 @@ for old, new in libcall_renames.items():
     text = re.sub(r'(!DISubprogram\(name:\s*")' + re.escape(old) + r'"',
                   r'\g<1>' + new + '"', text)
 
+# Optionally lower llvm.trap to the bpf_throw kfunc (BPF exceptions):
+# panic=immediate-abort turns every Rust panic/alloc-failure into llvm.trap,
+# which llc emits as __bpf_trap — and the verifier REJECTS any reachable
+# __bpf_trap. bpf_throw is the sanctioned "abort this program" mechanism:
+# the program cleanly returns the cookie instead. Enabled per-pipeline via
+# TRAP_TO_BPF_THROW=<cookie> (rust-selftests/collections sets it).
+trap_cookie = os.environ.get('TRAP_TO_BPF_THROW')
+if trap_cookie and re.search(r'call void @llvm\.trap\(\)', text):
+    text = re.sub(r'(tail\s+)?call void @llvm\.trap\(\)',
+                  f'call void @bpf_throw(i64 {int(trap_cookie, 0)})', text)
+    decl_line = f'declare void @bpf_throw(i64) #{attr_num}'
+    subrt = make_proto('bpf_throw', decl_line)
+    dbg_id = alloc_id()
+    file_ref = di_file if di_file else '!0'
+    new_metadata.append(
+        f'!{dbg_id} = !DISubprogram(name: "bpf_throw", scope: {file_ref}, '
+        f'file: {file_ref}, type: {subrt}, '
+        f'flags: DIFlagPrototyped, spFlags: DISPFlagOptimized)')
+    extra_decls.append(
+        f'declare !dbg !{dbg_id} void @bpf_throw(i64) '
+        f'#{attr_num} section ".ksyms"')
+
 # The renames above can leave a clashing external `declare` for a name the
 # module defines; drop it — the calls bind to the module-local definition.
 def drop_defined_declares(m):

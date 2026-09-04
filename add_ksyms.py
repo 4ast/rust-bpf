@@ -356,9 +356,12 @@ text = re.sub(
 #    for now; memmove semantics can be added as a separate kfunc later)
 #   call ... @memcmp(...) -> call ... @bpf_arena_memcmp(...)
 #   call ... @memcpy(...) -> call ... @bpf_arena_memcpy(...)
+# Argument matchers tolerate parenthesized attributes that contain commas
+# (align(8), dereferenceable(80), range(i64 1, 0), ...).
+_A = r'(?:[^,()]|\([^()]*\))*'
 mem_intrinsics = {
     'bpf_arena_memcpy': (r'call void @llvm\.(?:memcpy|memmove)\.p0\.p0\.i64\('
-                         r'(ptr[^,]*),\s*(ptr[^,]*),\s*(i64[^,]*),\s*i1[^)]*\)'),
+                         rf'(ptr{_A}),\s*(ptr{_A}),\s*(i64{_A}),\s*i1[^)]*\)'),
 }
 # llvm.memset is NOT rewritten here: llc expands constant-length memsets
 # inline, and turning them into a bpf_arena_memset kfunc call makes the
@@ -538,9 +541,13 @@ def fix_unreachable(text):
     for line in lines:
         m = re.match(r'define\s.*?\s+(@\S+)\(', line)
         if m:
-            rt = re.search(r'define\s+(?:internal\s+)?(?:fastcc\s+)?(?:noundef\s+)?(?:zeroext\s+)?(\S+)\s+@', line)
-            if rt:
-                ret_type = rt.group(1)
+            # the return type is the last token before '@name('; attributes
+            # like range(i32 0, 5) may precede it, so take the prefix up to
+            # '@' and split on whitespace
+            prefix = line[: line.index('@')]
+            toks = prefix.split()
+            if toks:
+                ret_type = toks[-1]
         if re.match(r'  +unreachable', line):
             indent = re.match(r'(  +)', line).group(1)
             meta = ''

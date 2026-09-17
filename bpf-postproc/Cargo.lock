@@ -13,7 +13,8 @@ name = "bpf-postproc"
 version = "0.1.0"
 dependencies = [
  "gimli",
- "llvm-sys",
+ "llvm-sys 221.0.1",
+ "llvm-sys 231.0.0",
  "thiserror",
 ]
 
@@ -89,6 +90,20 @@ name = "llvm-sys"
 version = "221.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2abcc34a3b190f03c2a61b555f218f529589ff13657bdd2ff8ac3e85f2abe6bb"
+dependencies = [
+ "anyhow",
+ "cc",
+ "lazy_static",
+ "libc",
+ "regex-lite",
+ "semver",
+]
+
+[[package]]
+name = "llvm-sys"
+version = "231.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0475bc87fdfb41f07d459d26d01534dbf24f51260dc8a38b661988e5e6b3432"
 dependencies = [
  "anyhow",
  "cc",

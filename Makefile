@@ -13,6 +13,13 @@ LLVM_LINK := $(LLVM_PREFIX)/bin/llvm-link
 LLVM_AS := $(LLVM_PREFIX)/bin/llvm-as
 LLVM_DIS := $(LLVM_PREFIX)/bin/llvm-dis
 LLVM_OBJCOPY := $(LLVM_PREFIX)/bin/llvm-objcopy
+LLVM_CONFIG := $(LLVM_PREFIX)/bin/llvm-config
+# "23.1.0" -> 23; trailing junk in development versions ("24.0.0git") is
+# harmless, only the first field is used. Selects the matching optional
+# llvm-sys dep in bpf-postproc/Cargo.toml, so the crate follows LLVM_PREFIX
+# instead of being pinned in Cargo.toml.
+LLVM_MAJOR := $(word 1,$(subst ., ,$(shell $(LLVM_CONFIG) --version 2>/dev/null)))
+POSTPROC_FEATURE := llvm-$(LLVM_MAJOR)
 TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 # Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
 # builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
@@ -99,11 +106,13 @@ $(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/
 # calls so the BPF backend emits CO-RE relocations.
 # llvm-sys locates LLVM via llvm-config on PATH (unless a version-specific
 # LLVM_SYS_<ver>_PREFIX env var overrides it), so putting the pinned install
-# first keeps this rule agnostic of the llvm-sys version in Cargo.toml.
+# first points it at LLVM_PREFIX. Each llvm-sys accepts only its own LLVM
+# major, so --features picks the crate for that major, and
+# --no-default-features keeps the other one from being built alongside it.
 $(BLDDIR)/bpf-postproc: $(wildcard $(CURDIR)/bpf-postproc/src/*.rs) $(CURDIR)/bpf-postproc/Cargo.toml
 	cd $(CURDIR)/bpf-postproc && \
 		PATH="$(LLVM_PREFIX)/bin:$$PATH" \
-		$(CARGO) build --release
+		$(CARGO) build --release --no-default-features --features $(POSTPROC_FEATURE)
 	@mkdir -p $(BLDDIR)
 	cp $(CURDIR)/bpf-postproc/target/release/bpf-postproc $@
 

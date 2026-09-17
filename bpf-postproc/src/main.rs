@@ -12,6 +12,8 @@
 // like `llvm_sys::core::*` without per-version qualification.
 #[cfg(feature = "llvm-22")]
 extern crate llvm_sys_22 as llvm_sys;
+#[cfg(feature = "llvm-23")]
+extern crate llvm_sys_23 as llvm_sys;
 
 use std::ffi::CString;
 use std::process::ExitCode;

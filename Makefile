@@ -46,7 +46,24 @@ HOST_TRIPLE ?= x86_64-unknown-linux-gnu
 
 PROGS := scx_simple scx_cosmos
 
-all: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS)))
+# Programs that let a bpf_throw() unwind through Rust Drop impls. These need
+# the .bpf_cleanup section, which only exists in LLVM >= 23 (9d51c891b719
+# "[BPF] Add exception handling support with .bpf_cleanup section"), so they
+# are only built when LLVM_PREFIX is new enough. An older backend has no
+# .bpf_cleanup to emit and would silently produce an object whose landing
+# pads the verifier cannot find, so `make` skips them and says why rather
+# than building something that cannot load.
+EH_PROGS := exc_cleanup
+ifeq ($(shell test "$(LLVM_MAJOR)" -ge 23 2>/dev/null && echo yes),yes)
+EH_BUILD := $(EH_PROGS)
+else
+EH_BUILD :=
+ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
+$(warning skipping $(EH_PROGS): .bpf_cleanup needs LLVM >= 23, LLVM_PREFIX is LLVM $(LLVM_MAJOR))
+endif
+endif
+
+all: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS) $(EH_BUILD)))
 
 # --- core ---
 $(DEPDIR)/libcore.rlib: $(RUST_SRC)/core/src/lib.rs
@@ -191,6 +208,56 @@ $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
 		--remove-section=.gcc_except_table \
 		--strip-symbol=rust_eh_personality $@.tmp $@
 	@rm -f $@.tmp
+
+# --- BPF exception-handling programs ---
+#
+# Same tools and the same bc -> linked -> opt -> ksyms -> o shape as the
+# pipeline above, with three differences:
+#
+#  * bpf-postproc is skipped, so -linked.bc feeds -opt.bc directly. All it
+#    does is lower #[btf] CO-RE polyfills, and these programs are built
+#    without --extern btf, so there is nothing for it to do.
+#  * add_ksyms.py runs with KEEP_INVOKE=1, so the invoke/landingpad pairs
+#    survive into codegen and the backend can emit the (begin, end,
+#    landing_pad) triples. Everything else the script does is still needed,
+#    in particular unreachable->ret (a Rust panic path otherwise ends without
+#    an exit insn) and the .ksyms tagging that puts bpf_throw, the cleanup
+#    kfuncs and _Unwind_Resume into BTF.
+#  * add_ksyms.py runs with KERNEL_BTF=1, which reduces Rust type names to C
+#    identifiers; the kernel rejects the whole .BTF section otherwise.
+#
+# The rules are generated per program because the ksyms step needs those two
+# environment variables and the pattern rule above does not set them.
+EH_KEEP_SYMS := entry _LICENSE
+EH_INTERNALIZE := $(foreach s,$(EH_KEEP_SYMS),--internalize-public-api-list=$(s))
+
+define EH_PROG_RULES
+$$(BLDDIR)/$(1).bc: $(1).rs $$(DEPDIR)/liballoc.rlib
+	@mkdir -p $$(BLDDIR)
+	$$(RUSTFLAGS_ENV) $$(RUSTC) --edition 2024 --crate-type rlib $$(RUSTC_COMMON) \
+		--sysroot=/dev/null -L$$(DEPDIR) \
+		--crate-name $(1) \
+		--emit=llvm-bc -o $$@ $$<
+
+$$(BLDDIR)/$(1)-opt.bc: $$(BLDDIR)/$(1)-linked.bc
+	$$(OPT) $$(EH_INTERNALIZE) --force-remove-attribute=cold \
+		-passes='forceattrs,internalize,globaldce,default<O2>' $$< -o $$@
+
+$$(BLDDIR)/$(1)-ksyms.bc: $$(BLDDIR)/$(1)-opt.bc
+	$$(LLVM_DIS) $$< -o $$@.ll
+	KEEP_INVOKE=1 KERNEL_BTF=1 python3 $$(CURDIR)/add_ksyms.py $$@.ll $$@.ll
+	$$(LLVM_AS) $$@.ll -o $$@.tmp.bc
+	$$(OPT) -passes=simplifycfg $$@.tmp.bc -o $$@.tmp2.bc
+	$$(LLVM_DIS) $$@.tmp2.bc -o $$@.ll
+	KEEP_INVOKE=1 KERNEL_BTF=1 python3 $$(CURDIR)/add_ksyms.py $$@.ll $$@.ll
+	$$(LLVM_AS) $$@.ll -o $$@
+	@rm -f $$@.ll $$@.tmp.bc $$@.tmp2.bc
+
+.PRECIOUS: $$(BLDDIR)/$(1).bc $$(BLDDIR)/$(1)-linked.bc \
+           $$(BLDDIR)/$(1)-opt.bc $$(BLDDIR)/$(1)-ksyms.bc
+endef
+
+$(foreach p,$(EH_PROGS),$(eval $(call EH_PROG_RULES,$(p))))
 
 clean:
 	rm -rf $(BLDDIR)

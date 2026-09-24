@@ -13,15 +13,29 @@ LLVM_LINK := $(LLVM_PREFIX)/bin/llvm-link
 LLVM_AS := $(LLVM_PREFIX)/bin/llvm-as
 LLVM_DIS := $(LLVM_PREFIX)/bin/llvm-dis
 LLVM_OBJCOPY := $(LLVM_PREFIX)/bin/llvm-objcopy
+LLVM_CONFIG := $(LLVM_PREFIX)/bin/llvm-config
+# "23.1.0" -> 23; trailing junk in development versions ("24.0.0git") is
+# harmless, only the first field is used. Selects the matching optional
+# llvm-sys dep in bpf-postproc/Cargo.toml, so the crate follows LLVM_PREFIX
+# instead of being pinned in Cargo.toml.
+LLVM_MAJOR := $(word 1,$(subst ., ,$(shell $(LLVM_CONFIG) --version 2>/dev/null)))
+POSTPROC_FEATURE := llvm-$(LLVM_MAJOR)
 TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 # Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
 # builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
 DEPDIR := $(CURDIR)/bld_deps
-# System rustc + /usr/lib/rustlib/src can be mismatched (RHEL packaging splits
-# the compiler and source versions). Default to the locally-built toolchain
-# under /w/rust, overridable via env or `make RUSTC=... RUST_SRC=...`.
-RUSTC ?= /w/rust/build/x86_64-unknown-linux-gnu/stage1/bin/rustc
-RUST_SRC ?= /w/rust/library
+# RUSTC and RUST_SRC must come from the SAME rustc: libcore/liballoc use lang
+# items and built-in macros that only the exactly-matching compiler knows
+# about, so a released toolchain paired with an unrelated rust checkout fails
+# outright (hundreds of errors in core). The nightly rustup toolchain plus its
+# own rust-src component is a matched pair by construction:
+#   rustup toolchain install nightly && rustup component add rust-src --toolchain nightly
+# To build against a rust git checkout instead, bootstrap it there
+# (`./configure && ./x.py build --stage 1 library`) and override both:
+#   make RUSTC=<tree>/build/<triple>/stage1/bin/rustc RUST_SRC=<tree>/library
+RUST_TOOLCHAIN ?= $(HOME)/.rustup/toolchains/nightly-$(HOST_TRIPLE)
+RUSTC ?= $(RUST_TOOLCHAIN)/bin/rustc
+RUST_SRC ?= $(RUST_TOOLCHAIN)/lib/rustlib/src/rust/library
 CARGO ?= cargo
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
@@ -32,7 +46,24 @@ HOST_TRIPLE ?= x86_64-unknown-linux-gnu
 
 PROGS := scx_simple scx_cosmos
 
-all: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS)))
+# Programs that let a bpf_throw() unwind through Rust Drop impls. These need
+# the .bpf_cleanup section, which only exists in LLVM >= 23 (9d51c891b719
+# "[BPF] Add exception handling support with .bpf_cleanup section"), so they
+# are only built when LLVM_PREFIX is new enough. An older backend has no
+# .bpf_cleanup to emit and would silently produce an object whose landing
+# pads the verifier cannot find, so `make` skips them and says why rather
+# than building something that cannot load.
+EH_PROGS := exc_cleanup
+ifeq ($(shell test "$(LLVM_MAJOR)" -ge 23 2>/dev/null && echo yes),yes)
+EH_BUILD := $(EH_PROGS)
+else
+EH_BUILD :=
+ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
+$(warning skipping $(EH_PROGS): .bpf_cleanup needs LLVM >= 23, LLVM_PREFIX is LLVM $(LLVM_MAJOR))
+endif
+endif
+
+all: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS) $(EH_BUILD)))
 
 # --- core ---
 $(DEPDIR)/libcore.rlib: $(RUST_SRC)/core/src/lib.rs
@@ -92,11 +123,13 @@ $(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/
 # calls so the BPF backend emits CO-RE relocations.
 # llvm-sys locates LLVM via llvm-config on PATH (unless a version-specific
 # LLVM_SYS_<ver>_PREFIX env var overrides it), so putting the pinned install
-# first keeps this rule agnostic of the llvm-sys version in Cargo.toml.
+# first points it at LLVM_PREFIX. Each llvm-sys accepts only its own LLVM
+# major, so --features picks the crate for that major, and
+# --no-default-features keeps the other one from being built alongside it.
 $(BLDDIR)/bpf-postproc: $(wildcard $(CURDIR)/bpf-postproc/src/*.rs) $(CURDIR)/bpf-postproc/Cargo.toml
 	cd $(CURDIR)/bpf-postproc && \
 		PATH="$(LLVM_PREFIX)/bin:$$PATH" \
-		$(CARGO) build --release
+		$(CARGO) build --release --no-default-features --features $(POSTPROC_FEATURE)
 	@mkdir -p $(BLDDIR)
 	cp $(CURDIR)/bpf-postproc/target/release/bpf-postproc $@
 
@@ -175,6 +208,56 @@ $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
 		--remove-section=.gcc_except_table \
 		--strip-symbol=rust_eh_personality $@.tmp $@
 	@rm -f $@.tmp
+
+# --- BPF exception-handling programs ---
+#
+# Same tools and the same bc -> linked -> opt -> ksyms -> o shape as the
+# pipeline above, with three differences:
+#
+#  * bpf-postproc is skipped, so -linked.bc feeds -opt.bc directly. All it
+#    does is lower #[btf] CO-RE polyfills, and these programs are built
+#    without --extern btf, so there is nothing for it to do.
+#  * add_ksyms.py runs with KEEP_INVOKE=1, so the invoke/landingpad pairs
+#    survive into codegen and the backend can emit the (begin, end,
+#    landing_pad) triples. Everything else the script does is still needed,
+#    in particular unreachable->ret (a Rust panic path otherwise ends without
+#    an exit insn) and the .ksyms tagging that puts bpf_throw, the cleanup
+#    kfuncs and _Unwind_Resume into BTF.
+#  * add_ksyms.py runs with KERNEL_BTF=1, which reduces Rust type names to C
+#    identifiers; the kernel rejects the whole .BTF section otherwise.
+#
+# The rules are generated per program because the ksyms step needs those two
+# environment variables and the pattern rule above does not set them.
+EH_KEEP_SYMS := entry _LICENSE
+EH_INTERNALIZE := $(foreach s,$(EH_KEEP_SYMS),--internalize-public-api-list=$(s))
+
+define EH_PROG_RULES
+$$(BLDDIR)/$(1).bc: $(1).rs $$(DEPDIR)/liballoc.rlib
+	@mkdir -p $$(BLDDIR)
+	$$(RUSTFLAGS_ENV) $$(RUSTC) --edition 2024 --crate-type rlib $$(RUSTC_COMMON) \
+		--sysroot=/dev/null -L$$(DEPDIR) \
+		--crate-name $(1) \
+		--emit=llvm-bc -o $$@ $$<
+
+$$(BLDDIR)/$(1)-opt.bc: $$(BLDDIR)/$(1)-linked.bc
+	$$(OPT) $$(EH_INTERNALIZE) --force-remove-attribute=cold \
+		-passes='forceattrs,internalize,globaldce,default<O2>' $$< -o $$@
+
+$$(BLDDIR)/$(1)-ksyms.bc: $$(BLDDIR)/$(1)-opt.bc
+	$$(LLVM_DIS) $$< -o $$@.ll
+	KEEP_INVOKE=1 KERNEL_BTF=1 python3 $$(CURDIR)/add_ksyms.py $$@.ll $$@.ll
+	$$(LLVM_AS) $$@.ll -o $$@.tmp.bc
+	$$(OPT) -passes=simplifycfg $$@.tmp.bc -o $$@.tmp2.bc
+	$$(LLVM_DIS) $$@.tmp2.bc -o $$@.ll
+	KEEP_INVOKE=1 KERNEL_BTF=1 python3 $$(CURDIR)/add_ksyms.py $$@.ll $$@.ll
+	$$(LLVM_AS) $$@.ll -o $$@
+	@rm -f $$@.ll $$@.tmp.bc $$@.tmp2.bc
+
+.PRECIOUS: $$(BLDDIR)/$(1).bc $$(BLDDIR)/$(1)-linked.bc \
+           $$(BLDDIR)/$(1)-opt.bc $$(BLDDIR)/$(1)-ksyms.bc
+endef
+
+$(foreach p,$(EH_PROGS),$(eval $(call EH_PROG_RULES,$(p))))
 
 clean:
 	rm -rf $(BLDDIR)

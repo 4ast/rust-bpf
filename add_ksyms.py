@@ -25,6 +25,26 @@ import os, re, subprocess, sys
 
 text = open(sys.argv[1]).read()
 
+# The kernel only accepts BTF type names that are C identifiers, so a
+# monomorphised Rust name like "NonNull<u8>" makes the whole .BTF section
+# unloadable and takes func_info/line_info down with it. Rewrite the offending
+# characters in the debug info the BTF is derived from. Only type names are
+# touched; file names and linkage names do not reach BTF.
+if os.environ.get('KERNEL_BTF'):
+    def sanitize_name(m):
+        head, name = m.group(1), m.group(2)
+        fixed = re.sub(r'[^0-9A-Za-z_]', '_', name)
+        if fixed and fixed[0].isdigit():
+            fixed = '_' + fixed
+        return f'{head}"{fixed}"'
+
+    text = re.sub(
+        r'(!(?:DICompositeType|DIBasicType|DIDerivedType|DIEnumerator|'
+        r'DISubprogram)\([^)]*?\bname:\s*)"([^"]*)"',
+        sanitize_name,
+        text,
+    )
+
 # Find the highest existing metadata ID so we can append new ones.
 max_id = max((int(m[1:]) for m in re.findall(r'!\d+', text)), default=0)
 
@@ -472,8 +492,12 @@ if re.search(r'^\s+resume\s', text, re.MULTILINE):
         text,
         flags=re.MULTILINE,
     )
-    decl_line = f'declare void @_Unwind_Resume(ptr) #{attr_num}'
-    subrt = make_proto('_Unwind_Resume', decl_line)
+    # No IR-derived fallback here: the call passes the exception object, but
+    # the kernel's _Unwind_Resume kfunc takes no arguments and the verifier
+    # rewrites the call into a return before it ever type checks it. Deriving
+    # void(ptr) from the declare would make libbpf's argument-count check
+    # reject it. A real kernel BTF prototype, if one is available, still wins.
+    subrt = make_proto('_Unwind_Resume', None)
     dbg_id = alloc_id()
     file_ref = di_file if di_file else '!0'
     new_metadata.append(
@@ -509,7 +533,13 @@ text = re.sub(r'^attributes (#\d+) = \{\s*\}$',
               r'attributes \1 = { noinline }', text, flags=re.MULTILINE)
 
 # Convert 'invoke' to 'call' + 'br', dropping the unwind path.
-# BPF has no exception handling.
+#
+# LLVM < 23 has no BPF exception handling, so the unwind edge has nowhere to
+# go and the landing pads are dead weight. With KEEP_INVOKE=1 the invokes are
+# left alone instead: LLVM >= 23 lowers them itself and records every invoke
+# region in .bpf_cleanup (9d51c891b719 "[BPF] Add exception handling support
+# with .bpf_cleanup section"), which is what lets bpf_throw() find the Drop
+# cleanup code at run time.
 def lower_invoke(m):
     indent = m.group(1)
     ret_assign = m.group(2) or ''
@@ -520,17 +550,18 @@ def lower_invoke(m):
     return (f'{indent}{ret_assign}call {tail.rstrip()}{call_meta}\n'
             f'{indent}br label %{normal}{call_meta}')
 
-text = re.sub(
-    r'^(\s+)((?:%\S+\s*=\s*)?)'
-    r'invoke\s+'
-    r'(.*?)'
-    r'\s+to\s+label\s+%(\S+)'
-    r'\s+unwind\s+label\s+%\S+'
-    r'((?:,\s*!\w+\s+!\d+)*)$',
-    lower_invoke,
-    text,
-    flags=re.MULTILINE,
-)
+if not os.environ.get('KEEP_INVOKE'):
+    text = re.sub(
+        r'^(\s+)((?:%\S+\s*=\s*)?)'
+        r'invoke\s+'
+        r'(.*?)'
+        r'\s+to\s+label\s+%(\S+)'
+        r'\s+unwind\s+label\s+%\S+'
+        r'((?:,\s*!\w+\s+!\d+)*)$',
+        lower_invoke,
+        text,
+        flags=re.MULTILINE,
+    )
 
 # Replace 'unreachable' with 'ret'. 'ret' compiles to a BPF exit insn.
 # BPF verifier requires every subprogram to end with exit or jmp.

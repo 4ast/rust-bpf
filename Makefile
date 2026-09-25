@@ -100,7 +100,7 @@ $(DEPDIR)/multi3.bc: $(CURDIR)/multi3.ll
 	$(LLVM_AS) $< -o $@
 
 # --- btf runtime crate (no_std, BPF target) ---
-$(DEPDIR)/libbtf.rlib: $(CURDIR)/btf/src/lib.rs $(DEPDIR)/libcore.rlib
+$(DEPDIR)/libbtf.rlib: $(CURDIR)/btf/src/lib.rs $(DEPDIR)/libcompiler_builtins.rlib
 	@mkdir -p $(DEPDIR)
 	$(RUSTFLAGS_ENV) $(RUSTC) --edition 2024 --crate-type rlib $(RUSTC_COMMON) \
 		--sysroot=/dev/null -L$(DEPDIR) \

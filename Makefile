@@ -44,7 +44,12 @@ RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2
 # Host triple for proc-macro and bpf-postproc builds (default to current).
 HOST_TRIPLE ?= x86_64-unknown-linux-gnu
 
-PROGS := scx_simple scx_cosmos
+# Programs demonstrating btf_type_tag / btf_decl_tag. They use the same
+# pipeline as the scx_* programs: btf_tags.py turns the `.btf_tags` manifest
+# emitted by #[btf_tag] into debug-info annotations.
+TAG_PROGS := type_tag_test decl_tag_test
+
+PROGS := scx_simple scx_cosmos $(TAG_PROGS)
 
 # Programs that let a bpf_throw() unwind through Rust Drop impls. These need
 # the .bpf_cleanup section, which only exists in LLVM >= 23 (9d51c891b719
@@ -180,6 +185,8 @@ KEEP_SYMS := simple_ops \
              cosmos_runnable cosmos_running cosmos_stopping \
              cosmos_enable cosmos_init_task cosmos_exit_task \
              cosmos_init cosmos_exit \
+             type_tag_entry TASK_TABLE \
+             decl_tag_entry tagged_subprog SLOT \
              _LICENSE
 INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list=$(s))
 $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
@@ -190,13 +197,20 @@ $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
 # add_ksyms.py converts invoke→call, making landing pad blocks dead.
 # simplifycfg removes those dead blocks. add_ksyms.py then fixes any
 # remaining unreachable (e.g. switch defaults).
-$(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc
+#
+# btf_tags.py runs last, for two reasons. It has to see the .ksyms
+# DISubprograms add_ksyms.py synthesises, because that is the only debug info a
+# kfunc declaration has and therefore the only place a `bpf_fastcall`-style
+# decl tag can attach. And BTF is generated from debug info by llc, so the
+# annotations only have to exist at this point.
+$(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py
 	$(LLVM_DIS) $< -o $@.ll
 	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@.tmp.bc
 	$(OPT) -passes=simplifycfg $@.tmp.bc -o $@.tmp2.bc
 	$(LLVM_DIS) $@.tmp2.bc -o $@.ll
 	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	python3 $(CURDIR)/btf_tags.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@
 	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc
 

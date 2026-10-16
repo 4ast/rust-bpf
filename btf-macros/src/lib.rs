@@ -2,11 +2,13 @@ use proc_macro::TokenStream;
 use proc_macro2::Ident;
 use quote::{format_ident, quote};
 use syn::{
-    Fields, GenericParam, ItemStruct, Path, Token, Visibility, braced,
+    Fields, GenericParam, Item, ItemStruct, Path, Token, Visibility, braced,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
 };
+
+mod tags;
 
 struct BtfArgs {
     flavor: Option<Ident>,
@@ -45,6 +47,34 @@ pub fn btf(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as BtfArgs);
     let item = parse_macro_input!(item as ItemStruct);
     expand_btf(item, args.flavor)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Requests BTF tags for an item, its fields, or its parameters.
+///
+/// `decl_tag = "..."` becomes a `BTF_KIND_DECL_TAG` on the declaration;
+/// `type_tag = "..."` (fields only) becomes a `BTF_KIND_TYPE_TAG` on the
+/// field's pointer type. Both may be repeated; `type_tag`s chain in the order
+/// written, matching C's `int __tag1 __tag2 *p`.
+///
+/// ```ignore
+/// #[btf_tag(decl_tag = "a_struct_tag")]
+/// #[repr(C)]
+/// struct value {
+///     #[btf_tag(type_tag = "kptr")]
+///     task: *mut task_struct,
+///     #[btf_tag(decl_tag = "a_member_tag")]
+///     count: u64,
+/// }
+/// ```
+///
+/// Nothing here reaches BTF directly. See `tags.rs` for the manifest protocol
+/// and `btf_tags.py` for the pass that consumes it.
+#[proc_macro_attribute]
+pub fn btf_tag(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as Item);
+    tags::expand(attr.into(), item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

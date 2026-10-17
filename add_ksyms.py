@@ -358,9 +358,11 @@ def add_ksyms(m):
     line = line.replace('declare ', f'declare !dbg !{dbg_id} ', 1)
     return f'{line} section ".ksyms"'
 
-# Skip LLVM intrinsics (@llvm.*) and rust_eh_personality.
+# Skip LLVM intrinsics (@llvm.*), rust_eh_personality, and the unwinder's entry
+# points when the program declares them: the backend lowers the calls.
 text = re.sub(
-    r'^declare\s(?!.*@llvm\.)(?!.*@rust_eh_personality\b).*#\d+\s*$',
+    r'^declare\s(?!.*@llvm\.)(?!.*@rust_eh_personality\b)'
+    r'(?!.*@_Unwind_(?:Resume|RaiseException)\b).*#\d+\s*$',
     add_ksyms,
     text,
     flags=re.MULTILINE,
@@ -450,17 +452,19 @@ trap_cookie = os.environ.get('TRAP_TO_BPF_THROW')
 if trap_cookie and re.search(r'call void @llvm\.trap\(\)', text):
     text = re.sub(r'(tail\s+)?call void @llvm\.trap\(\)',
                   f'call void @bpf_throw(i64 {int(trap_cookie, 0)})', text)
-    decl_line = f'declare void @bpf_throw(i64) #{attr_num}'
-    subrt = make_proto('bpf_throw', decl_line)
-    dbg_id = alloc_id()
-    file_ref = di_file if di_file else '!0'
-    new_metadata.append(
-        f'!{dbg_id} = !DISubprogram(name: "bpf_throw", scope: {file_ref}, '
-        f'file: {file_ref}, type: {subrt}, '
-        f'flags: DIFlagPrototyped, spFlags: DISPFlagOptimized)')
-    extra_decls.append(
-        f'declare !dbg !{dbg_id} void @bpf_throw(i64) '
-        f'#{attr_num} section ".ksyms"')
+    # The program may call bpf_throw by itself and have it declared already.
+    if not re.search(r'^declare\s.*@bpf_throw\(', text, re.MULTILINE):
+        decl_line = f'declare void @bpf_throw(i64) #{attr_num}'
+        subrt = make_proto('bpf_throw', decl_line)
+        dbg_id = alloc_id()
+        file_ref = di_file if di_file else '!0'
+        new_metadata.append(
+            f'!{dbg_id} = !DISubprogram(name: "bpf_throw", scope: {file_ref}, '
+            f'file: {file_ref}, type: {subrt}, '
+            f'flags: DIFlagPrototyped, spFlags: DISPFlagOptimized)')
+        extra_decls.append(
+            f'declare !dbg !{dbg_id} void @bpf_throw(i64) '
+            f'#{attr_num} section ".ksyms"')
 
 # The renames above can leave a clashing external `declare` for a name the
 # module defines; drop it — the calls bind to the module-local definition.
@@ -473,9 +477,15 @@ def drop_defined_declares(m):
 text = re.sub(r'^declare\s[^\n]*\n(?:[ \t]+section[^\n]*\n)?',
               drop_defined_declares, text, flags=re.MULTILINE)
 
+# KEEP_INVOKE=1: unwinding is left to the BPF backend, see lower_invoke below.
+keep_invoke = os.environ.get('KEEP_INVOKE')
+
 # LLC lowers 'resume' instructions to calls to _Unwind_Resume.
 # Replace resume with a direct call so BTF/.ksyms picks it up.
-if re.search(r'^\s+resume\s', text, re.MULTILINE):
+# Not with KEEP_INVOKE=1: the backend turns resume into 'r0 = 0; r3 = 1; exit'
+# and _Unwind_Resume does not reach the object. Spelling the call out here
+# would only keep the exception object, which nobody reads, alive over the pad.
+if not keep_invoke and re.search(r'^\s+resume\s', text, re.MULTILINE):
     # resume { ptr, i32 } %val -> extract ptr, call _Unwind_Resume, unreachable
     def replace_resume(m):
         indent = m.group(1)
@@ -528,18 +538,22 @@ for dbg_id in internal_dbg_ids:
     )
 
 # Strip 'noreturn' so LLVM doesn't DCE code after noreturn calls.
-text = re.sub(r'\bnoreturn\b', '', text)
-text = re.sub(r'^attributes (#\d+) = \{\s*\}$',
-              r'attributes \1 = { noinline }', text, flags=re.MULTILINE)
+# With KEEP_INVOKE=1 it stays. A call that may unwind and does not return can
+# only unwind, so the backend goes from it straight to the landing pad. Without
+# noreturn it has to look at r3, and the r3 == 0 side is a path that leaves the
+# function without running the pad, i.e. with every guard still held.
+if not keep_invoke:
+    text = re.sub(r'\bnoreturn\b', '', text)
+    text = re.sub(r'^attributes (#\d+) = \{\s*\}$',
+                  r'attributes \1 = { noinline }', text, flags=re.MULTILINE)
 
 # Convert 'invoke' to 'call' + 'br', dropping the unwind path.
 #
-# LLVM < 23 has no BPF exception handling, so the unwind edge has nowhere to
-# go and the landing pads are dead weight. With KEEP_INVOKE=1 the invokes are
-# left alone instead: LLVM >= 23 lowers them itself and records every invoke
-# region in .bpf_cleanup (9d51c891b719 "[BPF] Add exception handling support
-# with .bpf_cleanup section"), which is what lets bpf_throw() find the Drop
-# cleanup code at run time.
+# With KEEP_INVOKE=1 the invokes are left alone instead and the backend lowers
+# them ("[BPF] Lower unwinding to a flag in r3 and a branch"): a function that
+# can unwind says in r3 how it returns, and 'invoke f() unwind pad' becomes
+# 'call f; if r3 != 0 goto pad'. The landing pads with the Drop cleanup code
+# are ordinary blocks after that.
 def lower_invoke(m):
     indent = m.group(1)
     ret_assign = m.group(2) or ''
@@ -550,7 +564,7 @@ def lower_invoke(m):
     return (f'{indent}{ret_assign}call {tail.rstrip()}{call_meta}\n'
             f'{indent}br label %{normal}{call_meta}')
 
-if not os.environ.get('KEEP_INVOKE'):
+if not keep_invoke:
     text = re.sub(
         r'^(\s+)((?:%\S+\s*=\s*)?)'
         r'invoke\s+'
@@ -565,6 +579,8 @@ if not os.environ.get('KEEP_INVOKE'):
 
 # Replace 'unreachable' with 'ret'. 'ret' compiles to a BPF exit insn.
 # BPF verifier requires every subprogram to end with exit or jmp.
+# With KEEP_INVOKE=1 this still matters after a noreturn call that is nounwind.
+# What follows a noreturn call that may unwind is dropped by the backend.
 def fix_unreachable(text):
     lines = text.split('\n')
     out = []

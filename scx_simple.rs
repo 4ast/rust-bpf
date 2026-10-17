@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(panic_can_unwind)]
 
 extern crate alloc;
 
@@ -247,6 +248,13 @@ extern "C" {
                            len: u32) -> i32;
 }
 
+extern "C-unwind" {
+    /// Starts the unwind: landing pads only carry one on. It is the Itanium ABI's
+    /// name for that, the one std's panic runtime calls. Not a kfunc: LLVM lowers
+    /// the call. By its prototype it comes back when it fails. On BPF it cannot.
+    fn _Unwind_RaiseException(exception: *mut u8) -> i32;
+}
+
 struct BpfStream(i32);
 
 impl core::fmt::Write for BpfStream {
@@ -257,11 +265,31 @@ impl core::fmt::Write for BpfStream {
     }
 }
 
+/// A panic unwinds, so that every frame on the way out runs its Drop impls. One
+/// that cannot unwind, e.g. because it reached an extern "C" boundary, aborts
+/// the program with bpf_throw() instead. So does every panic when LLVM is too
+/// old to lower unwinding: the Makefile sets the cfg.
+///
+/// core raises the second kind from panic_nounwind_fmt(), which must not unwind
+/// and so has a landing pad that panics the same way again. The verifier takes
+/// that for recursion, even though it never runs, so the pad has to go: the
+/// handler is inlined to make can_unwind() a constant there, and what is left
+/// stays away from core::fmt, whose indirect calls may unwind as far as LLVM
+/// knows. Most such panics have a plain string for a message. The message of one
+/// that needs formatting is not printed.
 #[panic_handler]
+#[inline(always)]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
     let mut stream = BpfStream(0);
-    let _ = write!(stream, "{}", info);
+    if !cfg!(bpf_unwind) {
+        let _ = write!(stream, "{}", info);
+    } else if info.can_unwind() {
+        let _ = write!(stream, "{}", info);
+        unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };
+    } else if let Some(msg) = info.message().as_str() {
+        let _ = stream.write_str(msg);
+    }
     unsafe { bpf_throw(1) }
 }
 

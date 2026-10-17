@@ -51,20 +51,35 @@ TAG_PROGS := type_tag_test decl_tag_test
 
 PROGS := scx_simple scx_cosmos $(TAG_PROGS)
 
-# Programs that let a bpf_throw() unwind through Rust Drop impls. These need
-# the .bpf_cleanup section, which only exists in LLVM >= 23 (9d51c891b719
-# "[BPF] Add exception handling support with .bpf_cleanup section"), so they
-# are only built when LLVM_PREFIX is new enough. An older backend has no
-# .bpf_cleanup to emit and would silently produce an object whose landing
-# pads the verifier cannot find, so `make` skips them and says why rather
-# than building something that cannot load.
+# Programs that let a panic unwind through Rust Drop impls. These need a
+# backend that lowers unwinding to a flag in r3 and a branch ("[BPF] Lower
+# unwinding to a flag in r3 and a branch"), so they are only built when
+# LLVM_PREFIX is new enough. An older backend would silently produce an object
+# that calls _Unwind_RaiseException as a kfunc and never reaches a pad, so
+# `make` skips them and says why rather than building something that cannot
+# load.
+#
+# The other programs are built either way. With such a backend their panic
+# handlers unwind (--cfg bpf_unwind) and add_ksyms.py keeps the landing pads
+# (KEEP_INVOKE=1). Without it the handlers call bpf_throw() and the pads are
+# dropped.
+#
+# Some of the pads abort instead of cleaning up, e.g. the PanicGuard in
+# liballoc's btree::mem::replace(). That is llvm.trap, which llc emits as
+# __bpf_trap, and the verifier rejects a program that can reach it. It is one
+# more panic that cannot unwind, so it ends like the others
+# (TRAP_TO_BPF_THROW=1, the cookie the panic handlers use).
 EH_PROGS := exc_cleanup
-ifeq ($(shell test "$(LLVM_MAJOR)" -ge 23 2>/dev/null && echo yes),yes)
+ifeq ($(shell test "$(LLVM_MAJOR)" -ge 24 2>/dev/null && echo yes),yes)
 EH_BUILD := $(EH_PROGS)
+UNWIND_CFG := --cfg bpf_unwind
+KSYMS_ENV := KEEP_INVOKE=1 TRAP_TO_BPF_THROW=1
 else
 EH_BUILD :=
+UNWIND_CFG :=
+KSYMS_ENV :=
 ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
-$(warning skipping $(EH_PROGS): .bpf_cleanup needs LLVM >= 23, LLVM_PREFIX is LLVM $(LLVM_MAJOR))
+$(warning skipping $(EH_PROGS): unwinding via r3 needs LLVM >= 24, LLVM_PREFIX is LLVM $(LLVM_MAJOR))
 endif
 endif
 
@@ -146,6 +161,7 @@ $(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib $(DEPDIR)/libbtf.rlib $(BLDDIR)/lib
 		--extern btf=$(DEPDIR)/libbtf.rlib \
 		--extern btf_macros=$(BLDDIR)/libbtf_macros.so \
 		-Zcrate-attr='feature(alloc_error_handler)' \
+		--check-cfg 'cfg(bpf_unwind)' $(UNWIND_CFG) \
 		--crate-name $(basename $(notdir $<)) \
 		--emit=llvm-bc -o $@ $<
 
@@ -194,9 +210,9 @@ $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
 		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@
 
 # --- Add .ksyms, lower invoke→call, unreachable→ret for BPF ---
-# add_ksyms.py converts invoke→call, making landing pad blocks dead.
-# simplifycfg removes those dead blocks. add_ksyms.py then fixes any
-# remaining unreachable (e.g. switch defaults).
+# Without KEEP_INVOKE=1 add_ksyms.py converts invoke→call, making landing pad
+# blocks dead. simplifycfg removes those dead blocks. add_ksyms.py then fixes
+# any remaining unreachable (e.g. switch defaults).
 #
 # btf_tags.py runs last, for two reasons. It has to see the .ksyms
 # DISubprograms add_ksyms.py synthesises, because that is the only debug info a
@@ -205,11 +221,11 @@ $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
 # annotations only have to exist at this point.
 $(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py
 	$(LLVM_DIS) $< -o $@.ll
-	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(KSYMS_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@.tmp.bc
 	$(OPT) -passes=simplifycfg $@.tmp.bc -o $@.tmp2.bc
 	$(LLVM_DIS) $@.tmp2.bc -o $@.ll
-	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(KSYMS_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	python3 $(CURDIR)/btf_tags.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@
 	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc
@@ -231,17 +247,15 @@ $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
 #  * bpf-postproc is skipped, so -linked.bc feeds -opt.bc directly. All it
 #    does is lower #[btf] CO-RE polyfills, and these programs are built
 #    without --extern btf, so there is nothing for it to do.
-#  * add_ksyms.py runs with KEEP_INVOKE=1, so the invoke/landingpad pairs
-#    survive into codegen and the backend can emit the (begin, end,
-#    landing_pad) triples. Everything else the script does is still needed,
-#    in particular unreachable->ret (a Rust panic path otherwise ends without
-#    an exit insn) and the .ksyms tagging that puts bpf_throw, the cleanup
-#    kfuncs and _Unwind_Resume into BTF.
+#  * add_ksyms.py always runs with KEEP_INVOKE=1, so invoke, landingpad, resume
+#    and noreturn survive into codegen and the backend can lower them to r3
+#    and branches. The rest of what the script does is still needed, in
+#    particular the .ksyms tagging that puts the cleanup kfuncs into BTF.
 #  * add_ksyms.py runs with KERNEL_BTF=1, which reduces Rust type names to C
 #    identifiers; the kernel rejects the whole .BTF section otherwise.
 #
-# The rules are generated per program because the ksyms step needs those two
-# environment variables and the pattern rule above does not set them.
+# The rules are generated per program because the ksyms step needs KERNEL_BTF=1
+# and the pattern rule above does not set it.
 EH_KEEP_SYMS := entry _LICENSE
 EH_INTERNALIZE := $(foreach s,$(EH_KEEP_SYMS),--internalize-public-api-list=$(s))
 

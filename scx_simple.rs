@@ -101,7 +101,7 @@ impl TaskRef {
 }
 
 const SHARED_DSQ: u64 = 0;
-const SCX_DSQ_LOCAL: u64 = u64::MAX;
+const SCX_DSQ_LOCAL: u64 = (1 << 63) | 2;
 const SCX_SLICE_DFL: u64 = 20_000_000; // 20ms in ns
 
 static FIFO_SCHED: AtomicBool = AtomicBool::new(false);

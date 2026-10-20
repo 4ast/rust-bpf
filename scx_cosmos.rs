@@ -970,7 +970,7 @@ fn cosmos_exit_task(p: *mut task_struct) {
     }
 });
 
-bpf_prog!("struct_ops/cosmos_init",
+bpf_prog!("struct_ops.s/cosmos_init",
 fn cosmos_init() -> i32 {
     NR_CPU_IDS.store(unsafe { scx_bpf_nr_cpu_ids() }, Relaxed);
 

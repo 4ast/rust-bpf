@@ -103,8 +103,8 @@ $(DEPDIR)/liballoc.rlib: $(RUST_SRC)/alloc/src/lib.rs $(DEPDIR)/libcompiler_buil
 		--emit=link=$@ --emit=metadata=$(DEPDIR)/liballoc.rmeta \
 		$<
 
-# --- multi3 intrinsic ---
-$(DEPDIR)/multi3.bc: $(CURDIR)/multi3.ll
+# --- functions that llc calls on its own: __multi3, memset ---
+$(DEPDIR)/multi3.bc $(DEPDIR)/memset.bc: $(DEPDIR)/%.bc: $(CURDIR)/%.ll
 	@mkdir -p $(DEPDIR)
 	$(LLVM_AS) $< -o $@
 
@@ -165,14 +165,14 @@ $(DEPDIR)/extracted: $(DEPDIR)/libcore.rlib $(DEPDIR)/libcompiler_builtins.rlib 
 	@touch $@
 
 # --- Link all bitcode ---
-$(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc
+$(BLDDIR)/%-linked.bc: $(BLDDIR)/%.bc $(DEPDIR)/extracted $(DEPDIR)/multi3.bc $(DEPDIR)/memset.bc
 	@cp $< $@
 	@for i in 1 2 3 4 5; do \
 		$(LLVM_LINK) --only-needed $@ \
 			$$(find $(DEPDIR)/extracted -name '*.rcgu.o') \
 			-o $@.tmp && mv $@.tmp $@; \
 	done
-	@$(LLVM_LINK) $@ $(DEPDIR)/multi3.bc -o $@.tmp && mv $@.tmp $@
+	@$(LLVM_LINK) $@ $(DEPDIR)/multi3.bc $(DEPDIR)/memset.bc -o $@.tmp && mv $@.tmp $@
 
 # --- Lower btf polyfills to CO-RE relocations ---
 $(BLDDIR)/%-reloc.bc: $(BLDDIR)/%-linked.bc $(BLDDIR)/bpf-postproc
@@ -181,6 +181,10 @@ $(BLDDIR)/%-reloc.bc: $(BLDDIR)/%-linked.bc $(BLDDIR)/bpf-postproc
 # --- Optimize after linking (inlines trivial functions, DCE) ---
 # Internalize everything except struct_ops entry points and license,
 # then optimize. This lets opt remove dead global symbols.
+# __multi3 and memset look dead until llc. Only there a multiplication that
+# checks for overflow, like the one for the size of a Vec, turns into a call to
+# the first, and an llvm.memset that is too long to expand into a call to the
+# second.
 KEEP_SYMS := simple_ops \
              simple_select_cpu simple_enqueue simple_dispatch \
              simple_running simple_stopping simple_enable \
@@ -192,6 +196,7 @@ KEEP_SYMS := simple_ops \
              cosmos_init cosmos_exit \
              type_tag_entry TASK_TABLE \
              decl_tag_entry tagged_subprog SLOT \
+             __multi3 memset \
              _LICENSE
 INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list=$(s))
 $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc

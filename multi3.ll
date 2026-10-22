@@ -2,11 +2,14 @@
 ;
 ; 128-bit multiply for BPF using only 64-bit operations.
 ; Provides __multi3 libcall needed by LLVM BPF backend.
+;
+; Hidden: libbpf makes such a function static. With debug info: it needs a BTF
+; FUNC like every other subprogram of a program that has func_info.
 
 target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
 target triple = "bpfel"
 
-define i128 @__multi3(i128 %a, i128 %b) {
+define hidden i128 @__multi3(i128 %a, i128 %b) !dbg !4 {
   %a_lo = trunc i128 %a to i64
   %a_shr = lshr i128 %a, 64
   %a_hi = trunc i128 %a_shr to i64
@@ -42,3 +45,15 @@ define i128 @__multi3(i128 %a, i128 %b) {
   %result = or i128 %res_lo_ext, %res_hi_shifted
   ret i128 %result
 }
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2, !3}
+
+!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, producer: "multi3.ll", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "multi3.ll", directory: ".")
+!2 = !{i32 7, !"Dwarf Version", i32 4}
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!4 = distinct !DISubprogram(name: "__multi3", scope: !1, file: !1, line: 9, type: !5, scopeLine: 9, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!5 = !DISubroutineType(types: !6)
+!6 = !{!7, !7, !7}
+!7 = !DIBasicType(name: "__int128", size: 128, encoding: DW_ATE_unsigned)

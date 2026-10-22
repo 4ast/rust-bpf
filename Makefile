@@ -39,7 +39,7 @@ TAG_PROGS := type_tag_test decl_tag_test
 # Schedulers ported from C on top of scx_common.rs, the counterpart of
 # scx/common.bpf.h. Every symbol that has to survive internalize starts with
 # the name of the scheduler: its ops, its syscall programs, its maps.
-SCX_PORTS :=
+SCX_PORTS := cpu0
 
 PROGS := scx_simple scx_cosmos $(addprefix scx_,$(SCX_PORTS)) $(TAG_PROGS)
 

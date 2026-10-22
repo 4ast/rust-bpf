@@ -256,6 +256,7 @@ extern "C" {
     fn bpf_throw(cookie: u64) -> !;
     fn bpf_stream_vprintk(stream_id: i32, fmt: *const u8, args: *const u64,
                            len: u32) -> i32;
+    fn bpf_stream_print_stack(stream_id: i32) -> i32;
 }
 
 extern "C-unwind" {
@@ -265,12 +266,23 @@ extern "C-unwind" {
     fn _Unwind_RaiseException(exception: *mut u8) -> i32;
 }
 
+const BPF_STDERR: i32 = 2;
+
 struct BpfStream(i32);
 
 impl core::fmt::Write for BpfStream {
+    /// The printf of the kernel has no %.*s, and its %s wants a string that ends
+    /// with 0 in memory of the kernel. A &str is bytes in arena.
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let args: [u64; 2] = [s.as_ptr() as u64, s.len() as u64];
-        unsafe { bpf_stream_vprintk(self.0, b"%.*s\0".as_ptr(), args.as_ptr(), 16) };
+        let (chunks, rest) = s.as_bytes().as_chunks::<8>();
+        for chunk in chunks {
+            let args = chunk.map(u64::from);
+            unsafe { bpf_stream_vprintk(self.0, b"%c%c%c%c%c%c%c%c\0".as_ptr(), args.as_ptr(), 64) };
+        }
+        for &byte in rest {
+            let args = [byte as u64];
+            unsafe { bpf_stream_vprintk(self.0, b"%c\0".as_ptr(), args.as_ptr(), 8) };
+        }
         Ok(())
     }
 }
@@ -291,11 +303,12 @@ impl core::fmt::Write for BpfStream {
 #[inline(always)]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
-    let mut stream = BpfStream(0);
+    let mut stream = BpfStream(BPF_STDERR);
     if !cfg!(bpf_unwind) {
         let _ = write!(stream, "{}", info);
     } else if info.can_unwind() {
-        let _ = write!(stream, "{}", info);
+        let _ = writeln!(stream, "{}", info);
+        unsafe { bpf_stream_print_stack(BPF_STDERR) };
         unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };
     } else if let Some(msg) = info.message().as_str() {
         let _ = stream.write_str(msg);

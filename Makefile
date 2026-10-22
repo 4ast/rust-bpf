@@ -224,6 +224,39 @@ $(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_ta
 	$(LLVM_AS) $@.ll -o $@
 	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc
 
+# --- The same for the schedulers, whose memory is all in arena ---
+# LLVM picks the locals and the global data that go there before add_ksyms.py
+# turns memcpy and memcmp into kfuncs: what is passed to a kfunc is left where
+# the kernel can see it. The prototypes of the kfuncs are copied from the BTF of
+# the kernel. The stamp changes when another kernel is asked for.
+KSYMS_BTF_ENV := KSYM_BTF_FILES='$(KSYM_BTF_FILES)' BPFTOOL='$(BPFTOOL)'
+KSYMS_STAMP := $(BLDDIR)/.ksyms-btf
+KSYMS_STAMP_TEXT := $(shell cksum $(KSYM_BTF_FILES) 2>/dev/null)
+
+$(KSYMS_STAMP): FORCE
+	@mkdir -p $(BLDDIR)
+	@echo '$(KSYMS_STAMP_TEXT)' | cmp -s - $@ || echo '$(KSYMS_STAMP_TEXT)' > $@
+
+$(BLDDIR)/scx_%-ksyms.bc: $(BLDDIR)/scx_%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py $(KSYMS_STAMP)
+	$(OPT) -mtriple=bpfel -passes='$(ARENA_PASSES)' $< -o $@.arena.bc
+	$(LLVM_DIS) $@.arena.bc -o $@.ll
+	$(KSYMS_ENV) $(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(LLVM_AS) $@.ll -o $@.tmp.bc
+	$(OPT) -passes=simplifycfg $@.tmp.bc -o $@.tmp2.bc
+	$(LLVM_DIS) $@.tmp2.bc -o $@.ll
+	$(KSYMS_ENV) $(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	python3 $(CURDIR)/btf_tags.py $@.ll $@.ll
+	$(LLVM_AS) $@.ll -o $@
+	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc $@.arena.bc
+
+$(BLDDIR)/scx_%.o: $(BLDDIR)/scx_%-ksyms.bc
+	$(LLC) -march=bpfel -mcpu=v4 -mattr=$(LLC_ATTR) -filetype=obj -o $@.tmp $<
+	$(LLVM_OBJCOPY) \
+		--remove-section=.eh_frame --remove-section=.rel.eh_frame \
+		--remove-section=.gcc_except_table \
+		--strip-symbol=rust_eh_personality $@.tmp $@
+	@rm -f $@.tmp
+
 # --- Final BPF object ---
 $(BLDDIR)/%.o: $(BLDDIR)/%-ksyms.bc
 	$(LLC) -march=bpfel -mcpu=v4 -filetype=obj -o $@.tmp $<
@@ -289,4 +322,4 @@ distclean: clean
 
 .PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-reloc.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
 
-.PHONY: all clean distclean
+.PHONY: all clean distclean FORCE

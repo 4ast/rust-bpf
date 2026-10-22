@@ -7,6 +7,8 @@
 TOP := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 -include $(TOP)/config.mk
 
+# LLVM with register r12, the function table and the passes that keep the data
+# and the stack of a program in arena.
 LLVM_PREFIX ?= /w/llvm/llvm/bld/install
 
 # RUSTC and RUST_SRC must come from the SAME rustc: libcore/liballoc use lang
@@ -24,3 +26,15 @@ RUSTC ?= $(RUST_TOOLCHAIN)/bin/rustc
 RUST_SRC ?= $(RUST_TOOLCHAIN)/lib/rustlib/src/rust/library
 CARGO ?= $(RUST_TOOLCHAIN)/bin/cargo
 RUSTC_THREADS ?= 64
+
+# All memory of a program is in arena. opt picks the locals and the global data
+# that go there and makes the table for indirect calls, llc does the rest.
+ARENA_PASSES ?= bpf-func-table,bpf-arena-data,function(bpf-arena-stack)
+LLC_ATTR ?= +arena-stack,+arena-data
+
+# BTF of the kernel that the programs are for: add_ksyms.py copies the
+# prototypes of the kfuncs from there. The first file is vmlinux, the rest are
+# modules. BPFTOOL dumps it here and registers the schedulers in run-tests.sh,
+# for which it has to be linked with the libbpf of that kernel.
+KSYM_BTF_FILES ?= /sys/kernel/btf/vmlinux
+BPFTOOL ?= bpftool

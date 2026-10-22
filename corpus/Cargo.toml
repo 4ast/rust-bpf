@@ -10,6 +10,44 @@ autobins = false
 path = "src/lib.rs"
 
 [dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher", "inline-more"] }
+indexmap = { version = "2.14.2", default-features = false }
+smallvec = { version = "1.16.3", default-features = false }
+arrayvec = { version = "0.7.8", default-features = false }
+tinyvec = { version = "1.13.3", default-features = false, features = ["alloc"] }
+heapless = { version = "0.9.3", default-features = false }
+slab = { version = "0.4.12", default-features = false }
+bitflags = { version = "2.13.2", default-features = false }
+fixedbitset = { version = "0.5.7", default-features = false }
+bitvec = { version = "1.1.1", default-features = false, features = ["alloc"] }
+itertools = { version = "0.15.0", default-features = false, features = ["use_alloc"] }
+either = { version = "1.19.0", default-features = false }
+memchr = { version = "2.8.3", default-features = false }
+byteorder = { version = "1.5.0", default-features = false }
+fnv = { version = "1.0.7", default-features = false }
+ahash = { version = "0.8.12", default-features = false }
+hash32 = { version = "1.0.0", default-features = false }
+crc32fast = { version = "1.5.3", default-features = false }
+crc = { version = "3.4.0", default-features = false }
+sha2 = { version = "0.11.1", default-features = false }
+blake2 = { version = "0.11.0", default-features = false }
+siphasher = { version = "1.0.4", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
+rand_xoshiro = { version = "0.8.1", default-features = false }
+rand_pcg = { version = "0.10.2", default-features = false }
+num-traits = { version = "0.2.19", default-features = false }
+num-integer = { version = "0.1.47", default-features = false }
+itoa = { version = "1.0.18", default-features = false }
+nom = { version = "8.0.0", default-features = false, features = ["alloc"] }
+winnow = { version = "1.0.4", default-features = false, features = ["alloc", "parser", "ascii", "binary"] }
+serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
+spin = { version = "0.12.3", default-features = false, features = ["mutex", "spin_mutex", "rwlock", "once", "lazy"] }
+once_cell = { version = "1.21.4", default-features = false, features = ["race", "alloc"] }
+static_assertions = { version = "1.1.0", default-features = false }
+scopeguard = { version = "1.2.0", default-features = false }
+petgraph = { version = "0.8.3", default-features = false, features = ["graphmap", "stable_graph"] }
+priority-queue = { version = "2.7.0", default-features = false }
 
 [profile.release]
 opt-level = 3
@@ -120,6 +158,71 @@ crate-type = ["rlib"]
 [[example]]
 name = "c_str"
 path = "tests-bpf/c_str.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_bits"
+path = "tests-bpf/k_bits.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_bytes"
+path = "tests-bpf/k_bytes.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_crypto"
+path = "tests-bpf/k_crypto.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_graph"
+path = "tests-bpf/k_graph.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_hash"
+path = "tests-bpf/k_hash.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_iter"
+path = "tests-bpf/k_iter.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_map"
+path = "tests-bpf/k_map.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_num"
+path = "tests-bpf/k_num.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_parse"
+path = "tests-bpf/k_parse.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_rand"
+path = "tests-bpf/k_rand.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_serde"
+path = "tests-bpf/k_serde.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_small"
+path = "tests-bpf/k_small.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k_sync"
+path = "tests-bpf/k_sync.rs"
 crate-type = ["rlib"]
 
 [[example]]

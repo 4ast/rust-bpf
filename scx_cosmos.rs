@@ -39,7 +39,6 @@ const SCX_TASK_QUEUED: u32 = 1;
 const SCX_WAKE_TTWU: u64 = 0x08;
 const SCX_WAKE_SYNC: u64 = 0x10;
 const SCX_KICK_IDLE: u64 = 1;
-const SCX_PICK_IDLE_CORE: u64 = 1;
 const PF_IDLE: u32 = 0x0000_0002;
 const PF_EXITING: u32 = 0x0000_0004;
 
@@ -72,7 +71,6 @@ extern "C" {
     fn bpf_free(ptr: *mut u8);
     fn bpf_cpumask_test_cpu(cpu: i32, mask: *const u64) -> bool;
     fn bpf_cpumask_first(mask: *const u64) -> i32;
-    fn bpf_cpumask_intersects(a: *const u64, b: *const u64) -> bool;
 
     fn scx_bpf_select_cpu_dfl(p: *mut task_struct, prev_cpu: i32,
                                wake_flags: u64, is_idle: *mut bool) -> i32;
@@ -215,6 +213,35 @@ impl CpuCtx {
 struct BpfCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for BpfCell<T> {}
 
+// ── CPU sets ─────────────────────────────────────────────────────────
+
+/// replaces struct bpf_cpumask __kptr *. A pointer of the kernel that is stored
+/// in arena comes back as a number, which no kfunc takes for a cpumask.
+struct CpuSet([AtomicU64; MAX_CPUS / 64]);
+
+impl CpuSet {
+    const fn new() -> Self { CpuSet([const { AtomicU64::new(0) }; MAX_CPUS / 64]) }
+
+    fn word(&self, cpu: i32) -> Option<(&AtomicU64, u64)> {
+        let cpu = usize::try_from(cpu).ok()?;
+        Some((self.0.get(cpu / 64)?, 1 << (cpu % 64)))
+    }
+
+    fn test(&self, cpu: i32) -> bool {
+        self.word(cpu).is_some_and(|(w, bit)| w.load(Relaxed) & bit != 0)
+    }
+    fn set(&self, cpu: i32) {
+        if let Some((w, bit)) = self.word(cpu) { w.fetch_or(bit, Relaxed); }
+    }
+    fn clear(&self) { self.0.iter().for_each(|w| w.store(0, Relaxed)) }
+
+    /// bpf_cpumask_intersects() with a cpumask of the kernel.
+    fn intersects(&self, mask: *const u64) -> bool {
+        (0..min(nr_cpu_ids() as usize, MAX_CPUS) as i32)
+            .any(|cpu| self.test(cpu) && unsafe { bpf_cpumask_test_cpu(cpu, mask) })
+    }
+}
+
 // ── Configuration (const volatile equivalents) ───────────────────────
 
 static SLICE_NS: AtomicU64 = AtomicU64::new(1_000_000);
@@ -272,11 +299,10 @@ static PREFERRED_CPUS: BpfCell<[u64; MAX_CPUS]> =
 // SMT sibling per CPU
 static SMT_SIBLING: BpfCell<[i32; MAX_CPUS]> =
     BpfCell(UnsafeCell::new([-1i32; MAX_CPUS]));
-// per-node cpumask pointers (stored as opaque u64)
-static NODE_CPUMASK: BpfCell<[u64; MAX_NODES]> =
-    BpfCell(UnsafeCell::new([0u64; MAX_NODES]));
-// primary cpumask (opaque pointer)
-static PRIMARY_MASK: AtomicU64 = AtomicU64::new(0);
+// CPUs of each node
+static NODE_CPUS: [CpuSet; MAX_NODES] = [const { CpuSet::new() }; MAX_NODES];
+// primary scheduling domain
+static PRIMARY_CPUS: CpuSet = CpuSet::new();
 // flat idle scan last_cpu
 static FLAT_LAST_CPU: BpfCell<u32> = BpfCell(UnsafeCell::new(0));
 
@@ -330,9 +356,8 @@ fn smt_sibling(cpu: i32) -> i32 {
     if s < 0 { cpu } else { s }
 }
 
-fn node_cpumask(node: i32) -> *const u64 {
-    if node < 0 || node as usize >= MAX_NODES { return core::ptr::null(); }
-    unsafe { (*NODE_CPUMASK.0.get())[node as usize] as *const u64 }
+fn node_cpus(node: i32) -> Option<&'static CpuSet> {
+    NODE_CPUS.get(usize::try_from(node).ok()?)
 }
 
 fn shared_dsq(cpu: i32) -> u64 {
@@ -417,10 +442,7 @@ fn cpus_share_cache(this_cpu: i32, that_cpu: i32) -> bool {
 }
 
 fn is_primary_cpu(cpu: i32) -> bool {
-    if PRIMARY_ALL.load(Relaxed) { return true; }
-    let mask = PRIMARY_MASK.load(Relaxed) as *const u64;
-    if mask.is_null() { return true; }
-    unsafe { bpf_cpumask_test_cpu(cpu, mask) }
+    PRIMARY_ALL.load(Relaxed) || PRIMARY_CPUS.test(cpu)
 }
 
 fn is_cpu_idle(cpu: i32) -> bool {
@@ -455,9 +477,7 @@ fn is_wake_affine(waker: &TaskRef, wakee: &TaskRef) -> bool {
 fn can_use_node(p: &TaskRef, node: i32) -> bool {
     if !NUMA_ENABLED.load(Relaxed) { return true; }
     if p.nr_cpus_allowed() as u64 == nr_cpu_ids() { return true; }
-    let mask = node_cpumask(node);
-    if mask.is_null() { return false; }
-    unsafe { bpf_cpumask_intersects(mask, p.cpus_ptr()) }
+    node_cpus(node).is_some_and(|cpus| cpus.intersects(p.cpus_ptr()))
 }
 
 fn task_should_migrate(p: &TaskRef) -> bool {
@@ -471,8 +491,7 @@ fn pick_cpu_on_gpu_node(p: &TaskRef, current_node: i32, _tctx: &TaskCtx) -> i32 
     if target_node < 0 || target_node == current_node { return -1; }
     if !can_use_node(p, target_node) { return -1; }
 
-    let mask = node_cpumask(target_node);
-    if mask.is_null() { return -1; }
+    if node_cpus(target_node).is_none() { return -1; }
 
     // Would intersect with p->cpus_ptr and pick idle
     -1
@@ -526,13 +545,13 @@ fn update_cpu_load(p: &TaskRef, slice: u64) {
 /// Try to pick idle CPU from preferred list, optionally filtering by
 /// primary domain and SMT full-idle mask.
 fn pick_idle_cpu_pref_smt(p: &TaskRef, prev_cpu: i32, is_prev_allowed: bool,
-                           primary: *const u64, smt: *const u64) -> i32 {
+                           primary: Option<&CpuSet>, smt: *const u64) -> i32 {
     let max_cpus = min(nr_cpu_ids() as usize, MAX_CPUS);
     let preferred = unsafe { &*PREFERRED_CPUS.0.get() as &[u64; MAX_CPUS] };
 
     // Try prev_cpu first
     if is_prev_allowed &&
-       (primary.is_null() || unsafe { bpf_cpumask_test_cpu(prev_cpu, primary) }) &&
+       primary.is_none_or(|cpus| cpus.test(prev_cpu)) &&
        (smt.is_null() || unsafe { bpf_cpumask_test_cpu(prev_cpu, smt) }) &&
        test_cpu_idle(prev_cpu) {
         return prev_cpu;
@@ -553,7 +572,7 @@ fn pick_idle_cpu_pref_smt(p: &TaskRef, prev_cpu: i32, is_prev_allowed: bool,
 
         if cpu == prev_cpu || !p.cpu_allowed(cpu) { continue; }
 
-        if (primary.is_null() || unsafe { bpf_cpumask_test_cpu(cpu, primary) }) &&
+        if primary.is_none_or(|cpus| cpus.test(cpu)) &&
            (smt.is_null() || unsafe { bpf_cpumask_test_cpu(cpu, smt) }) &&
            test_cpu_idle(cpu) {
             if !PREFERRED_IDLE_SCAN.load(Relaxed) {
@@ -568,11 +587,7 @@ fn pick_idle_cpu_pref_smt(p: &TaskRef, prev_cpu: i32, is_prev_allowed: bool,
 
 fn pick_idle_cpu_flat(p: &TaskRef, prev_cpu: i32) -> i32 {
     let is_prev_allowed = p.cpu_allowed(prev_cpu);
-    let primary = if !PRIMARY_ALL.load(Relaxed) {
-        PRIMARY_MASK.load(Relaxed) as *const u64
-    } else {
-        core::ptr::null()
-    };
+    let primary = Some(&PRIMARY_CPUS);
     let smt = if SMT_ENABLED.load(Relaxed) {
         unsafe { scx_bpf_get_idle_smtmask() }
     } else {
@@ -608,7 +623,7 @@ fn pick_idle_cpu_flat(p: &TaskRef, prev_cpu: i32) -> i32 {
     // Try full-idle core anywhere
     if SMT_ENABLED.load(Relaxed) {
         let cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed,
-                                          core::ptr::null(), smt);
+                                          None, smt);
         if cpu >= 0 {
             if !smt.is_null() { unsafe { scx_bpf_put_cpumask(smt) }; }
             return cpu;
@@ -617,7 +632,7 @@ fn pick_idle_cpu_flat(p: &TaskRef, prev_cpu: i32) -> i32 {
 
     // Try any idle CPU anywhere
     let cpu = pick_idle_cpu_pref_smt(p, prev_cpu, is_prev_allowed,
-                                      core::ptr::null(), core::ptr::null());
+                                      None, core::ptr::null());
 
     if !smt.is_null() { unsafe { scx_bpf_put_cpumask(smt) }; }
     cpu
@@ -657,13 +672,17 @@ fn pick_idle_cpu(p: &TaskRef, prev_cpu: i32, this_cpu: i32,
         return if is_idle { cpu } else { -1 };
     }
 
-    // Try primary domain with idle core preference
-    let primary_mask = PRIMARY_MASK.load(Relaxed) as *const u64;
-    if !PRIMARY_ALL.load(Relaxed) && !primary_mask.is_null() {
-        let cpu = unsafe {
-            scx_bpf_select_cpu_and(p.0, prev, wake, primary_mask,
-                                    if AVOID_SMT.load(Relaxed) { SCX_PICK_IDLE_CORE } else { 0 })
+    // Try primary domain with idle core preference. It is not a cpumask that
+    // scx_bpf_select_cpu_and() could take, so walk it.
+    if !PRIMARY_ALL.load(Relaxed) {
+        let smt = if AVOID_SMT.load(Relaxed) {
+            unsafe { scx_bpf_get_idle_smtmask() }
+        } else {
+            core::ptr::null()
         };
+        let cpu = pick_idle_cpu_pref_smt(p, prev, p.cpu_allowed(prev),
+                                          Some(&PRIMARY_CPUS), smt);
+        if !smt.is_null() { unsafe { scx_bpf_put_cpumask(smt) }; }
         if cpu >= 0 { return cpu; }
     }
 
@@ -677,11 +696,8 @@ fn keep_running(p: &TaskRef, cpu: i32) -> bool {
     if !p.is_queued() { return false; }
     if p.is_pcpu() { return true; }
     if AVOID_SMT.load(Relaxed) && is_smt_contended(cpu) { return false; }
-    if !is_primary_cpu(cpu) {
-        let mask = PRIMARY_MASK.load(Relaxed) as *const u64;
-        if !mask.is_null() && unsafe { bpf_cpumask_intersects(p.cpus_ptr(), mask) } {
-            return false;
-        }
+    if !is_primary_cpu(cpu) && PRIMARY_CPUS.intersects(p.cpus_ptr()) {
+        return false;
     }
     true
 }
@@ -1039,9 +1055,12 @@ fn enable_sibling_cpu(input: &DomainArg) -> i32 {
 #[link_section = "syscall"]
 #[no_mangle]
 fn enable_primary_cpu(input: &CpuArg) -> i32 {
-    // Would set bit in primary cpumask; simplified with atomic store
-    // In practice this would use bpf_cpumask_set_cpu on a kptr cpumask
-    let _ = input.cpu_id;
+    // A negative CPU clears the domain.
+    if input.cpu_id < 0 {
+        PRIMARY_CPUS.clear();
+    } else {
+        PRIMARY_CPUS.set(input.cpu_id);
+    }
     0
 }
 

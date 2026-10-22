@@ -18,6 +18,11 @@ panic = "unwind"
 codegen-units = 1
 
 [[example]]
+name = "c_async"
+path = "tests-bpf/c_async.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "c_atomic"
 path = "tests-bpf/c_atomic.rs"
 crate-type = ["rlib"]

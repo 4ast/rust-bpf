@@ -23,6 +23,11 @@ path = "tests-bpf/c_atomic.rs"
 crate-type = ["rlib"]
 
 [[example]]
+name = "c_float"
+path = "tests-bpf/c_float.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "c_fmt"
 path = "tests-bpf/c_fmt.rs"
 crate-type = ["rlib"]

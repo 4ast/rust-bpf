@@ -4,9 +4,9 @@
 #
 # Usage: make
 
+include $(dir $(lastword $(MAKEFILE_LIST)))toolchain.mk
+
 BLDDIR := $(CURDIR)/bld
-LLVM_PREFIX ?= /w/llvm/llvm/bld/install
-CLANG := $(LLVM_PREFIX)/bin/clang
 LLC := $(LLVM_PREFIX)/bin/llc
 OPT := $(LLVM_PREFIX)/bin/opt
 LLVM_LINK := $(LLVM_PREFIX)/bin/llvm-link
@@ -27,25 +27,9 @@ TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 # Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
 # builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
 DEPDIR := $(CURDIR)/bld_deps
-# RUSTC and RUST_SRC must come from the SAME rustc: libcore/liballoc use lang
-# items and built-in macros that only the exactly-matching compiler knows
-# about, so a released toolchain paired with an unrelated rust checkout fails
-# outright (hundreds of errors in core). The nightly rustup toolchain plus its
-# own rust-src component is a matched pair by construction:
-#   rustup toolchain install nightly && rustup component add rust-src --toolchain nightly
-# To build against a rust git checkout instead, bootstrap it there
-# (`./configure && ./x.py build --stage 1 library`) and override both:
-#   make RUSTC=<tree>/build/<triple>/stage1/bin/rustc RUST_SRC=<tree>/library
-RUST_TOOLCHAIN ?= $(HOME)/.rustup/toolchains/nightly-$(HOST_TRIPLE)
-RUSTC ?= $(RUST_TOOLCHAIN)/bin/rustc
-RUST_SRC ?= $(RUST_TOOLCHAIN)/lib/rustlib/src/rust/library
-CARGO ?= cargo
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
-RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=64
-
-# Host triple for proc-macro and bpf-postproc builds (default to current).
-HOST_TRIPLE ?= x86_64-unknown-linux-gnu
+RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=$(RUSTC_THREADS)
 
 # Programs demonstrating btf_type_tag / btf_decl_tag. They use the same
 # pipeline as the scx_* programs: btf_tags.py turns the `.btf_tags` manifest
@@ -136,7 +120,7 @@ $(DEPDIR)/libbtf.rlib: $(CURDIR)/btf/src/lib.rs $(DEPDIR)/libcompiler_builtins.r
 # crates are always host-targeted; rustc loads the resulting .so when
 # expanding `#[btf]` in BPF-target builds.
 $(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/btf-macros/Cargo.toml
-	cd $(CURDIR)/btf-macros && RUSTC=$(RUSTC) $(CARGO) build --release
+	cd $(CURDIR)/btf-macros && PATH="$(RUST_TOOLCHAIN)/bin:$$PATH" RUSTC=$(RUSTC) $(CARGO) build --release
 	@mkdir -p $(BLDDIR)
 	cp $(CURDIR)/btf-macros/target/release/libbtf_macros.so $@
 
@@ -151,7 +135,7 @@ $(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/
 # --no-default-features keeps the other one from being built alongside it.
 $(BLDDIR)/bpf-postproc: $(wildcard $(CURDIR)/bpf-postproc/src/*.rs) $(CURDIR)/bpf-postproc/Cargo.toml
 	cd $(POSTPROC_DIR) && \
-		PATH="$(LLVM_PREFIX)/bin:$$PATH" LLVM_CONFIG=$(LLVM_CONFIG) \
+		PATH="$(LLVM_PREFIX)/bin:$(RUST_TOOLCHAIN)/bin:$$PATH" LLVM_CONFIG=$(LLVM_CONFIG) \
 		$(CARGO) build --release --no-default-features --features $(POSTPROC_FEATURE)
 	@mkdir -p $(BLDDIR)
 	cp $(POSTPROC_DIR)/target/release/bpf-postproc $@

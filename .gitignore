@@ -1,3 +1,4 @@
 target/
 bld/
 bld_deps/
+config.mk

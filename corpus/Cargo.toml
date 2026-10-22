@@ -23,6 +23,11 @@ path = "tests-bpf/c_atomic.rs"
 crate-type = ["rlib"]
 
 [[example]]
+name = "c_deep"
+path = "tests-bpf/c_deep.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "c_float"
 path = "tests-bpf/c_float.rs"
 crate-type = ["rlib"]
@@ -65,6 +70,11 @@ crate-type = ["rlib"]
 [[example]]
 name = "c_panic"
 path = "tests-bpf/c_panic.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_rec"
+path = "tests-bpf/c_rec.rs"
 crate-type = ["rlib"]
 
 [[example]]

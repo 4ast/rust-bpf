@@ -243,30 +243,46 @@ impl CpuSet {
 }
 
 // ── Configuration (const volatile equivalents) ───────────────────────
+//
+// User space sets them before it loads the scheduler. They are exported as
+// cosmos_NAME: nothing in the program writes to them, and LLVM replaces
+// a variable that nobody outside can see and nobody inside writes with its
+// initial value. All the code for the other values would be gone.
 
-static SLICE_NS: AtomicU64 = AtomicU64::new(1_000_000);
-static SLICE_LAG: AtomicU64 = AtomicU64::new(20_000_000);
-static BUSY_THRESHOLD: AtomicU64 = AtomicU64::new(0);
-static NR_CPU_IDS: AtomicU64 = AtomicU64::new(0);
-static NR_NODE_IDS: AtomicU64 = AtomicU64::new(0);
-static PERF_CONFIG: AtomicU64 = AtomicU64::new(0);
-static PERF_THRESHOLD: AtomicU64 = AtomicU64::new(0);
-static PERF_STICKY: AtomicU64 = AtomicU64::new(0);
-static PERF_STICKY_THRESHOLD: AtomicU64 = AtomicU64::new(0);
+macro_rules! tunables {
+    ($($name:ident: $ty:ty = $val:expr;)*) => {
+        $(
+            #[export_name = concat!("cosmos_", stringify!($name))]
+            static $name: $ty = <$ty>::new($val);
+        )*
+    };
+}
 
-static PRIMARY_ALL: AtomicBool = AtomicBool::new(true);
-static FLAT_IDLE_SCAN: AtomicBool = AtomicBool::new(false);
-static SMT_ENABLED: AtomicBool = AtomicBool::new(true);
-static PREFERRED_IDLE_SCAN: AtomicBool = AtomicBool::new(false);
-static ALL_CPUS_SAME_CAPACITY: AtomicBool = AtomicBool::new(false);
-static CPUFREQ_ENABLED: AtomicBool = AtomicBool::new(true);
-static NUMA_ENABLED: AtomicBool = AtomicBool::new(false);
-static GPU_ENABLED: AtomicBool = AtomicBool::new(true);
-static AVOID_SMT: AtomicBool = AtomicBool::new(true);
-static MM_AFFINITY: AtomicBool = AtomicBool::new(false);
-static TICK_PREEMPT: AtomicBool = AtomicBool::new(true);
-static NO_WAKE_SYNC: AtomicBool = AtomicBool::new(false);
-static NO_EARLY_CLEAR: AtomicBool = AtomicBool::new(false);
+tunables! {
+    SLICE_NS: AtomicU64 = 1_000_000;
+    SLICE_LAG: AtomicU64 = 20_000_000;
+    BUSY_THRESHOLD: AtomicU64 = 0;
+    NR_CPU_IDS: AtomicU64 = 0;
+    NR_NODE_IDS: AtomicU64 = 0;
+    PERF_CONFIG: AtomicU64 = 0;
+    PERF_THRESHOLD: AtomicU64 = 0;
+    PERF_STICKY: AtomicU64 = 0;
+    PERF_STICKY_THRESHOLD: AtomicU64 = 0;
+
+    PRIMARY_ALL: AtomicBool = true;
+    FLAT_IDLE_SCAN: AtomicBool = false;
+    SMT_ENABLED: AtomicBool = true;
+    PREFERRED_IDLE_SCAN: AtomicBool = false;
+    ALL_CPUS_SAME_CAPACITY: AtomicBool = false;
+    CPUFREQ_ENABLED: AtomicBool = true;
+    NUMA_ENABLED: AtomicBool = false;
+    GPU_ENABLED: AtomicBool = true;
+    AVOID_SMT: AtomicBool = true;
+    MM_AFFINITY: AtomicBool = false;
+    TICK_PREEMPT: AtomicBool = true;
+    NO_WAKE_SYNC: AtomicBool = false;
+    NO_EARLY_CLEAR: AtomicBool = false;
+}
 
 // ── Global state (all in arena) ──────────────────────────────────────
 
@@ -282,6 +298,7 @@ static TASK_CTXS: BpfCell<Option<BTreeMap<u32, UnsafeCell<TaskCtx>>>> =
 static CPU_CTXS: BpfCell<[CpuCtx; MAX_CPUS]> =
     BpfCell(UnsafeCell::new([CpuCtx::new(); MAX_CPUS]));
 // replaces BPF_MAP_TYPE_ARRAY cpu_util_map
+#[export_name = "cosmos_CPU_UTIL"]
 static CPU_UTIL: BpfCell<[u64; MAX_CPUS]> =
     BpfCell(UnsafeCell::new([0u64; MAX_CPUS]));
 // replaces BPF_MAP_TYPE_HASH cpu_node_map
@@ -291,17 +308,22 @@ static CPU_NODE_MAP: BpfCell<Option<BTreeMap<u32, u32>>> =
 static GPU_PID_MAP: BpfCell<Option<BTreeMap<u32, u32>>> =
     BpfCell(UnsafeCell::new(None));
 // CPU capacity values (const volatile array)
+#[export_name = "cosmos_CPU_CAPACITY"]
 static CPU_CAPACITY: BpfCell<[u64; MAX_CPUS]> =
     BpfCell(UnsafeCell::new([SCX_CPUPERF_ONE; MAX_CPUS]));
 // preferred CPU ordering for flat idle scan
+#[export_name = "cosmos_PREFERRED_CPUS"]
 static PREFERRED_CPUS: BpfCell<[u64; MAX_CPUS]> =
     BpfCell(UnsafeCell::new([0u64; MAX_CPUS]));
 // SMT sibling per CPU
+#[export_name = "cosmos_SMT_SIBLING"]
 static SMT_SIBLING: BpfCell<[i32; MAX_CPUS]> =
     BpfCell(UnsafeCell::new([-1i32; MAX_CPUS]));
 // CPUs of each node
+#[export_name = "cosmos_NODE_CPUS"]
 static NODE_CPUS: [CpuSet; MAX_NODES] = [const { CpuSet::new() }; MAX_NODES];
 // primary scheduling domain
+#[export_name = "cosmos_PRIMARY_CPUS"]
 static PRIMARY_CPUS: CpuSet = CpuSet::new();
 // flat idle scan last_cpu
 static FLAT_LAST_CPU: BpfCell<u32> = BpfCell(UnsafeCell::new(0));

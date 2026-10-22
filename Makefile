@@ -207,15 +207,7 @@ $(BLDDIR)/%-reloc.bc: $(BLDDIR)/%-linked.bc $(BLDDIR)/bpf-postproc
 # checks for overflow, like the one for the size of a Vec, turns into a call to
 # the first, and an llvm.memset that is too long to expand into a call to the
 # second.
-KEEP_SYMS := simple_ops \
-             simple_select_cpu simple_enqueue simple_dispatch \
-             simple_running simple_stopping simple_enable \
-             simple_init simple_exit \
-             cosmos_ops \
-             cosmos_select_cpu cosmos_tick cosmos_enqueue cosmos_dispatch \
-             cosmos_runnable cosmos_running cosmos_stopping \
-             cosmos_enable cosmos_init_task cosmos_exit_task \
-             cosmos_init cosmos_exit \
+KEEP_SYMS := simple_* cosmos_* enable_sibling_cpu enable_primary_cpu \
              type_tag_entry TASK_TABLE \
              decl_tag_entry tagged_subprog SLOT \
              $(addsuffix _*,$(SCX_PORTS)) \

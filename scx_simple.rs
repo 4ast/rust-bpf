@@ -104,6 +104,10 @@ const SHARED_DSQ: u64 = 0;
 const SCX_DSQ_LOCAL: u64 = (1 << 63) | 2;
 const SCX_SLICE_DFL: u64 = 20_000_000; // 20ms in ns
 
+// User space sets it before it loads the scheduler. Exported: nothing in the
+// program writes to it, and LLVM replaces a variable that nobody outside can see
+// and nobody inside writes with its initial value. FifoPolicy would be gone.
+#[export_name = "simple_FIFO_SCHED"]
 static FIFO_SCHED: AtomicBool = AtomicBool::new(false);
 static VTIME_NOW: AtomicU64 = AtomicU64::new(0);
 

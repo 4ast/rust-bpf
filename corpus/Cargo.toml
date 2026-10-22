@@ -48,6 +48,44 @@ static_assertions = { version = "1.1.0", default-features = false }
 scopeguard = { version = "1.2.0", default-features = false }
 petgraph = { version = "0.8.3", default-features = false, features = ["graphmap", "stable_graph"] }
 priority-queue = { version = "2.7.0", default-features = false }
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
+lz4_flex = { version = "0.14.0", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+uuid = { version = "1.28.0", default-features = false }
+semver = { version = "1.0.28", default-features = false }
+bytes = { version = "1.12.1", default-features = false }
+bumpalo = { version = "3.20.3", default-features = false, features = ["collections", "boxed"] }
+slotmap = { version = "1.1.1", default-features = false }
+aho-corasick = { version = "1.1.5", default-features = false }
+regex-automata = { version = "0.4.18", default-features = false, features = ["alloc", "syntax", "meta", "nfa-pikevm", "nfa-backtrack"] }
+unicode-segmentation = { version = "1.13.3", default-features = false }
+unicode-normalization = { version = "0.1.26", default-features = false }
+thiserror = { version = "2.0.21", default-features = false }
+anyhow = { version = "1.0.104", default-features = false }
+bytemuck = { version = "1.25.2", default-features = false, features = ["derive"] }
+crossbeam-queue = { version = "0.3.14", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+libm = { version = "0.2.16", default-features = false }
+ryu = { version = "1.0.23", default-features = false }
+fixed = { version = "1.31.0", default-features = false }
+chacha20 = { version = "0.10.2", default-features = false, features = ["cipher"] }
+aes = { version = "0.9.3", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+sha1 = { version = "0.11.0", default-features = false }
+sha3 = { version = "0.12.0", default-features = false }
+md-5 = { version = "0.11.0", default-features = false }
+rand = { version = "0.10.3", default-features = false, features = ["alloc"] }
+rand_chacha = { version = "0.10.0", default-features = false }
+minicbor = { version = "2.3.1", default-features = false, features = ["alloc", "derive"] }
+strum = { version = "0.28.0", default-features = false, features = ["derive"] }
+num_enum = { version = "0.7.6", default-features = false }
+smol_str = { version = "0.3.7", default-features = false }
+glam = { version = "0.34.1", default-features = false, features = ["libm"] }
+num-bigint = { version = "0.5.1", default-features = false }
+num-rational = { version = "0.4.2", default-features = false }
+adler2 = { version = "2.0.1", default-features = false }
 
 [profile.release]
 opt-level = 3
@@ -158,6 +196,26 @@ crate-type = ["rlib"]
 [[example]]
 name = "c_str"
 path = "tests-bpf/c_str.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k2_crypto"
+path = "tests-bpf/k2_crypto.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k2_mem"
+path = "tests-bpf/k2_mem.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k2_misc"
+path = "tests-bpf/k2_misc.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k2_text"
+path = "tests-bpf/k2_text.rs"
 crate-type = ["rlib"]
 
 [[example]]

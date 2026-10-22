@@ -44,3 +44,10 @@ BPFTOOL ?= bpftool
 # The libbpf of that kernel, for corpus/run.c: a directory with include/ and
 # libbpf.a. Empty: the one of the system.
 LIBBPF ?=
+
+# For run-tests.sh. VM_BIN: the directory with vm-up KIT PORT CPUS MB, vm-ssh
+# PORT CMD and vm-down PORT. VM_RUN: where vm-up keeps PORT/console.log.
+# VERISTAT: its path in the VM.
+VM_BIN ?=
+VM_RUN ?=
+VERISTAT ?= veristat

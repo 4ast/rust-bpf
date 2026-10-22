@@ -4,3 +4,4 @@ bld_deps/
 corpus/bld/
 corpus/vendor/
 config.mk
+test-out*/

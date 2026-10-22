@@ -51,9 +51,9 @@ test!(x25519_rfc7748, {
 });
 ```
 
-The state of a CPU scheduler, `scx_flatcg.rs`, abridged. In C it is a cgroup
-storage map, a `bpf_rb_root`, a hash map of kptrs and `bpf_cgroup_ancestor()`
-per level:
+The state of a CPU scheduler, `scx_flatcg.rs`, abridged. The original in
+`tools/sched_ext` keeps it in what BPF had to offer: a cgroup storage map,
+a `bpf_rb_root`, a hash map of kptrs, and `bpf_cgroup_ancestor()` per level:
 
 ```rust
 static CGV_TREE: SpinLock<BinaryHeap<Reverse<CgvNode>>> = SpinLock::new(BinaryHeap::new());
@@ -76,21 +76,27 @@ impl CgrpCtx {
 }
 ```
 
-## How it differs from BPF in C
+## Before and after
 
-| BPF in C | here |
-|---|---|
-| state lives in maps: hash, array, per-CPU array, task and cgroup storage, queue, rbtree, kptr | state lives in `static`s and on the heap: `BTreeMap`, `Vec`, `VecDeque`, `BinaryHeap`, `Arc`, `Box`. Maps are left for what the kernel has to find: timers and ring buffers. |
-| pointers to arena are `__arena`, a different address space | plain references and pointers. The compiler inserts the casts. |
-| 512 bytes of stack, 2 Kbyte in bpf-next | locals whose address is taken go to a stack in arena, 32 Kbyte per call chain |
-| loops have to be bounded in a way that the verifier can see, or use `bpf_for`, `bpf_loop()`, `can_loop` | any loop that has an exit |
-| no recursion | recursion, limited at run time |
-| direct calls. `callx` is new in bpf-next. | function pointers, `&dyn Trait`, `Box<dyn Fn>`, vtables in static data |
-| 5 arguments, 12 in bpf-next | as many as the Rust ABI needs. The helpers of `derive(Debug)` take up to 23 registers worth. |
-| an error path for every acquire, or the verifier complains | `Drop`. References, RCU sections and interrupt flags are released on every path, a panic included. |
-| the program has to convince the verifier that an index is in bounds | the bounds check is in the code. When it fails it panics. `panic!`, `unwrap()` and overflow checks unwind through landing pads, and a panic can be caught. |
-| 1 million insns and 8192 pending jumps per program for the verifier | no such limits. The largest program has 98,044 insns and 623 functions. |
-| no floats, no 128 bit division | soft float, `u128`/`i128`, libm, from `compiler_builtins` |
+What a BPF program could do before this work, and what it can do now. The
+limits on the left are those of the insn set, the LLVM backend and the verifier.
+They hold for every language that is compiled to BPF, Rust included. What lifts
+them is [in LLVM and in the kernel](#what-it-took), not in rustc. Rust is what
+it is measured with.
+
+| | before | after |
+|---|---|---|
+| state | in maps: hash, array, per-CPU array, task and cgroup storage, queue, rbtree, kptr | in global data and on the heap: `static`, `BTreeMap`, `Vec`, `VecDeque`, `BinaryHeap`, `Arc`, `Box`. Maps are left for what the kernel has to find: timers and ring buffers. |
+| pointers | a pointer to arena is in a different address space, and the source has to say so: `__arena` | one kind of pointer. The compiler inserts the casts. |
+| stack | 512 bytes, 2 Kbyte in bpf-next | locals whose address is taken go to a stack in arena, 32 Kbyte per call chain |
+| loops | bounded in a way that the verifier can see, or written with `bpf_for`, `bpf_loop()`, `can_loop` | any loop that has an exit |
+| recursion | rejected | allowed, limited at run time |
+| calls | direct. `callx` is new in bpf-next. | function pointers, `&dyn Trait`, `Box<dyn Fn>`, vtables in static data |
+| arguments | 5, 12 in bpf-next | as many as the ABI needs. The helpers of `derive(Debug)` take up to 23 registers worth. |
+| cleanup | the source has an error path for every acquire, or the verifier complains. Unwinding is new in bpf-next. | `Drop` releases references, RCU sections and interrupt flags on every path, a panic included. |
+| bounds | the program has to convince the verifier that an index is in bounds | the bounds check is in the code. When it fails it panics. `panic!`, `unwrap()` and overflow checks unwind through landing pads, and a panic can be caught. |
+| size | 1 million insns and 8192 pending jumps per program for the verifier | no such limits. The largest program has 98,044 insns and 623 functions. |
+| arithmetic | no floats, no 128 bit division | soft float, `u128`/`i128`, libm, from `compiler_builtins` |
 
 ## The language, core and alloc
 
@@ -170,7 +176,7 @@ schedulers on top of `scx_common.rs` (1,359 lines), the counterpart of
 `scx/common.bpf.h`. The head of each file lists what became what and what was
 left out.
 
-| | from | Rust lines | programs | BPF insns | verifier, ms | instead of maps, gotos and macros |
+| | from | Rust lines | programs | BPF insns | verifier, ms | what it uses |
 |---|---|---|---|---|---|---|
 | simple | | 347 | 8 | 5,618 | 35 | `BTreeMap` |
 | cosmos | sched-ext/scx | 1,147 | 12 | 6,227 | 37 | `BTreeMap`, arrays |
@@ -191,7 +197,7 @@ left out.
 
 All 223 programs are verified in 4.6 seconds together.
 
-There is no user space part. What the loader of a C scheduler provides
+There is no user space part. What the loader of the original provides
 (topology, domains, tunables) is probed or computed in `ops.init()`.
 
 Each scheduler is registered with `bpftool struct_ops register`, gets a load of

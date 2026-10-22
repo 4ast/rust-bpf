@@ -77,7 +77,13 @@ $(warning skipping $(EH_PROGS): unwinding via r3 needs LLVM >= 24, LLVM_PREFIX i
 endif
 endif
 
-all: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS) $(EH_BUILD)))
+all: progs
+progs: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS) $(EH_BUILD))) $(BLDDIR)/scxload
+
+# Loads a scheduler and attaches all of its programs.
+$(BLDDIR)/scxload: scxload.c
+	@mkdir -p $(BLDDIR)
+	$(CC) -O2 -Wall $(if $(LIBBPF),-I$(LIBBPF)/include) -o $@ $< $(if $(LIBBPF),$(LIBBPF)/libbpf.a,-lbpf) -lelf -lz
 
 # --- core ---
 $(DEPDIR)/libcore.rlib: $(RUST_SRC)/core/src/lib.rs
@@ -334,4 +340,4 @@ distclean: clean
 
 .PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-reloc.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
 
-.PHONY: all clean distclean FORCE
+.PHONY: all progs clean distclean FORCE

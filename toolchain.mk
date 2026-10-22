@@ -38,3 +38,7 @@ LLC_ATTR ?= +arena-stack,+arena-data
 # for which it has to be linked with the libbpf of that kernel.
 KSYM_BTF_FILES ?= /sys/kernel/btf/vmlinux
 BPFTOOL ?= bpftool
+
+# The libbpf of that kernel, for corpus/run.c: a directory with include/ and
+# libbpf.a. Empty: the one of the system.
+LIBBPF ?=

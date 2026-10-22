@@ -1,0 +1,6 @@
+[package]
+name = "llvm-sys"
+version = "240.0.0-local"
+edition = "2021"
+build = "build.rs"
+links = "llvm"

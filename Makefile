@@ -20,6 +20,9 @@ LLVM_CONFIG := $(LLVM_PREFIX)/bin/llvm-config
 # instead of being pinned in Cargo.toml.
 LLVM_MAJOR := $(word 1,$(subst ., ,$(shell $(LLVM_CONFIG) --version 2>/dev/null)))
 POSTPROC_FEATURE := llvm-$(LLVM_MAJOR)
+# There is no llvm-sys crate for LLVM 24 yet: bpf-postproc/llvm24 has a manifest
+# for the same sources with bindings of its own.
+POSTPROC_DIR := $(CURDIR)/bpf-postproc$(if $(filter 24,$(LLVM_MAJOR)),/llvm24)
 TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 # Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
 # builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
@@ -147,11 +150,11 @@ $(BLDDIR)/libbtf_macros.so: $(wildcard $(CURDIR)/btf-macros/src/*.rs) $(CURDIR)/
 # major, so --features picks the crate for that major, and
 # --no-default-features keeps the other one from being built alongside it.
 $(BLDDIR)/bpf-postproc: $(wildcard $(CURDIR)/bpf-postproc/src/*.rs) $(CURDIR)/bpf-postproc/Cargo.toml
-	cd $(CURDIR)/bpf-postproc && \
-		PATH="$(LLVM_PREFIX)/bin:$$PATH" \
+	cd $(POSTPROC_DIR) && \
+		PATH="$(LLVM_PREFIX)/bin:$$PATH" LLVM_CONFIG=$(LLVM_CONFIG) \
 		$(CARGO) build --release --no-default-features --features $(POSTPROC_FEATURE)
 	@mkdir -p $(BLDDIR)
-	cp $(CURDIR)/bpf-postproc/target/release/bpf-postproc $@
+	cp $(POSTPROC_DIR)/target/release/bpf-postproc $@
 
 # --- Build BPF program bitcode ---
 $(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib $(DEPDIR)/libbtf.rlib $(BLDDIR)/libbtf_macros.so

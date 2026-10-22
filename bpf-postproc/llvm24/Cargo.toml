@@ -1,0 +1,21 @@
+# Builds ../src unmodified against the minimal bindings of the LLVM C API in
+# ./llvm-sys: there is no llvm-sys crate for LLVM 24 yet.
+[package]
+name = "bpf-postproc"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bpf-postproc"
+path = "../src/main.rs"
+
+[features]
+default = ["llvm-24"]
+llvm-24 = []
+
+[dependencies]
+gimli = "0.32"
+thiserror = "2"
+llvm-sys-24 = { package = "llvm-sys", path = "llvm-sys" }
+
+[workspace]

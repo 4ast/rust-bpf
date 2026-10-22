@@ -237,8 +237,12 @@ $(KSYMS_STAMP): FORCE
 	@mkdir -p $(BLDDIR)
 	@echo '$(KSYMS_STAMP_TEXT)' | cmp -s - $@ || echo '$(KSYMS_STAMP_TEXT)' > $@
 
-$(BLDDIR)/scx_%-ksyms.bc: $(BLDDIR)/scx_%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py $(KSYMS_STAMP)
-	$(OPT) -mtriple=bpfel -passes='$(ARENA_PASSES)' $< -o $@.arena.bc
+# The parameters of kfuncs that do want memory in arena.
+$(BLDDIR)/arena-kfunc-args: $(CURDIR)/arena_kfunc_args.py $(KSYMS_STAMP)
+	BPFTOOL='$(BPFTOOL)' python3 $< $(KSYM_BTF_FILES) > $@
+
+$(BLDDIR)/scx_%-ksyms.bc: $(BLDDIR)/scx_%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py $(KSYMS_STAMP) $(BLDDIR)/arena-kfunc-args
+	$(OPT) -mtriple=bpfel -passes='$(ARENA_PASSES)' -bpf-arena-kfunc-args=$$(cat $(BLDDIR)/arena-kfunc-args) $< -o $@.arena.bc
 	$(LLVM_DIS) $@.arena.bc -o $@.ll
 	$(KSYMS_ENV) $(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@.tmp.bc

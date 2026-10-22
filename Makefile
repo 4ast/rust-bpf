@@ -39,7 +39,7 @@ TAG_PROGS := type_tag_test decl_tag_test
 # Schedulers ported from C on top of scx_common.rs, the counterpart of
 # scx/common.bpf.h. Every symbol that has to survive internalize starts with
 # the name of the scheduler: its ops, its syscall programs, its maps.
-SCX_PORTS := cpu0 bpfland tickless beerland flash central rusty flatcg p2dq mitosis qmap pair sdt
+SCX_PORTS := cpu0 bpfland tickless beerland flash central rusty flatcg p2dq mitosis lavd qmap pair sdt
 
 PROGS := scx_simple scx_cosmos $(addprefix scx_,$(SCX_PORTS)) $(TAG_PROGS)
 
@@ -166,6 +166,7 @@ $(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib $(DEPDIR)/libbtf.rlib $(BLDDIR)/lib
 		--emit=llvm-bc -o $@ $<
 
 $(foreach p,$(SCX_PORTS),$(BLDDIR)/scx_$(p).bc): scx_common.rs
+$(BLDDIR)/scx_lavd.bc: $(wildcard scx_lavd/*.rs)
 
 # --- Extract .rlib contents for linking ---
 $(DEPDIR)/extracted: $(DEPDIR)/libcore.rlib $(DEPDIR)/libcompiler_builtins.rlib $(DEPDIR)/liballoc.rlib

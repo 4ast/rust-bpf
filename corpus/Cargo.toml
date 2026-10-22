@@ -123,6 +123,11 @@ path = "tests-bpf/c_str.rs"
 crate-type = ["rlib"]
 
 [[example]]
+name = "p_algo"
+path = "tests-bpf/p_algo.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "smoke"
 path = "tests-bpf/smoke.rs"
 crate-type = ["rlib"]

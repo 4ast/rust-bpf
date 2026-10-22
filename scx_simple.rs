@@ -289,8 +289,7 @@ impl core::fmt::Write for BpfStream {
 
 /// A panic unwinds, so that every frame on the way out runs its Drop impls. One
 /// that cannot unwind, e.g. because it reached an extern "C" boundary, aborts
-/// the program with bpf_throw() instead. So does every panic when LLVM is too
-/// old to lower unwinding: the Makefile sets the cfg.
+/// the program with bpf_throw() instead.
 ///
 /// core raises the second kind from panic_nounwind_fmt(), which must not unwind
 /// and so has a landing pad that panics the same way again. The verifier takes
@@ -304,9 +303,7 @@ impl core::fmt::Write for BpfStream {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
     let mut stream = BpfStream(BPF_STDERR);
-    if !cfg!(bpf_unwind) {
-        let _ = write!(stream, "{}", info);
-    } else if info.can_unwind() {
+    if info.can_unwind() {
         let _ = writeln!(stream, "{}", info);
         unsafe { bpf_stream_print_stack(BPF_STDERR) };
         unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };

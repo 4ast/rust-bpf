@@ -1351,9 +1351,7 @@ impl core::fmt::Write for BpfStream {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
     let mut stream = BpfStream(BPF_STDERR);
-    if !cfg!(bpf_unwind) {
-        let _ = write!(stream, "{}", info);
-    } else if info.can_unwind() {
+    if info.can_unwind() {
         let _ = writeln!(stream, "{}", info);
         unsafe { bpf_stream_print_stack(BPF_STDERR) };
         unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };

@@ -512,7 +512,7 @@ def trap_to_unwind(text):
     return '\n'.join(out)
 
 
-if (os.environ.get('TRAP_TO_UNWIND') and os.environ.get('KEEP_INVOKE')
+if (os.environ.get('TRAP_TO_UNWIND')
         and re.search(r'^declare .*@_Unwind_RaiseException\(', text, re.M)):
     text = trap_to_unwind(text)
 
@@ -545,47 +545,6 @@ def drop_defined_declares(m):
 text = re.sub(r'^declare\s[^\n]*\n(?:[ \t]+section[^\n]*\n)?',
               drop_defined_declares, text, flags=re.MULTILINE)
 
-# KEEP_INVOKE=1: unwinding is left to the BPF backend, see lower_invoke below.
-keep_invoke = os.environ.get('KEEP_INVOKE')
-
-# LLC lowers 'resume' instructions to calls to _Unwind_Resume.
-# Replace resume with a direct call so BTF/.ksyms picks it up.
-# Not with KEEP_INVOKE=1: the backend turns resume into 'r0 = 0; r3 = 1; exit'
-# and _Unwind_Resume does not reach the object. Spelling the call out here
-# would only keep the exception object, which nobody reads, alive over the pad.
-if not keep_invoke and re.search(r'^\s+resume\s', text, re.MULTILINE):
-    # resume { ptr, i32 } %val -> extract ptr, call _Unwind_Resume, unreachable
-    def replace_resume(m):
-        indent = m.group(1)
-        val = m.group(2)
-        meta = m.group(3) or ''
-        # Use a unique tmp name based on position to avoid SSA conflicts.
-        tmp = f'%_unwind_ptr.{m.start()}'
-        return (f'{indent}{tmp} = extractvalue {{ ptr, i32 }} {val}, 0{meta}\n'
-                f'{indent}call void @_Unwind_Resume(ptr {tmp}){meta}\n'
-                f'{indent}unreachable')
-    text = re.sub(
-        r'^(\s+)resume \{ ptr, i32 \} (\S+)(,\s*!dbg\s+!\d+)?$',
-        replace_resume,
-        text,
-        flags=re.MULTILINE,
-    )
-    # No IR-derived fallback here: the call passes the exception object, but
-    # the kernel's _Unwind_Resume kfunc takes no arguments and the verifier
-    # rewrites the call into a return before it ever type checks it. Deriving
-    # void(ptr) from the declare would make libbpf's argument-count check
-    # reject it. A real kernel BTF prototype, if one is available, still wins.
-    subrt = make_proto('_Unwind_Resume', None)
-    dbg_id = alloc_id()
-    file_ref = di_file if di_file else '!0'
-    new_metadata.append(
-        f'!{dbg_id} = !DISubprogram(name: "_Unwind_Resume", scope: {file_ref}, '
-        f'file: {file_ref}, type: {subrt}, '
-        f'flags: DIFlagPrototyped, spFlags: DISPFlagOptimized)')
-    extra_decls.append(
-        f'declare !dbg !{dbg_id} void @_Unwind_Resume(ptr) '
-        f'#{attr_num} section ".ksyms"')
-
 # Fix BTF linkage: Rust emits DISPFlagDefinition | DISPFlagOptimized for all
 # functions, even internal ones. Without DISPFlagLocalToUnit, LLC generates
 # BTF FUNC with linkage=global. The verifier then treats internal subprogs as
@@ -605,50 +564,16 @@ for dbg_id in internal_dbg_ids:
         text,
     )
 
-# Strip 'noreturn' so LLVM doesn't DCE code after noreturn calls.
-# With KEEP_INVOKE=1 it stays. A call that may unwind and does not return can
-# only unwind, so the backend goes from it straight to the landing pad. Without
-# noreturn it has to look at r3, and the r3 == 0 side is a path that leaves the
-# function without running the pad, i.e. with every guard still held.
-if not keep_invoke:
-    text = re.sub(r'\bnoreturn\b', '', text)
-    text = re.sub(r'^attributes (#\d+) = \{\s*\}$',
-                  r'attributes \1 = { noinline }', text, flags=re.MULTILINE)
-
-# Convert 'invoke' to 'call' + 'br', dropping the unwind path.
-#
-# With KEEP_INVOKE=1 the invokes are left alone instead and the backend lowers
-# them ("[BPF] Lower unwinding to a flag in r3 and a branch"): a function that
-# can unwind says in r3 how it returns, and 'invoke f() unwind pad' becomes
-# 'call f; if r3 != 0 goto pad'. The landing pads with the Drop cleanup code
-# are ordinary blocks after that.
-def lower_invoke(m):
-    indent = m.group(1)
-    ret_assign = m.group(2) or ''
-    tail = m.group(3)
-    normal = m.group(4)
-    meta = m.group(5) or ''
-    call_meta = re.sub(r',\s*!noalias\s+!\d+', '', meta)
-    return (f'{indent}{ret_assign}call {tail.rstrip()}{call_meta}\n'
-            f'{indent}br label %{normal}{call_meta}')
-
-if not keep_invoke:
-    text = re.sub(
-        r'^(\s+)((?:%\S+\s*=\s*)?)'
-        r'invoke\s+'
-        r'(.*?)'
-        r'\s+to\s+label\s+%(\S+)'
-        r'\s+unwind\s+label\s+%\S+'
-        r'((?:,\s*!\w+\s+!\d+)*)$',
-        lower_invoke,
-        text,
-        flags=re.MULTILINE,
-    )
+# invoke, landingpad, resume and noreturn are left alone. The backend lowers them:
+# 'invoke f() unwind pad' becomes 'call f; unwind_goto pad', 'resume' becomes
+# 'r0 = 0; unwind_exit'. The landing pads with the Drop cleanup code are ordinary
+# blocks after that. A call that may unwind and does not return can only unwind,
+# so the backend goes from it straight to the landing pad.
 
 # Replace 'unreachable' with 'ret'. 'ret' compiles to a BPF exit insn.
 # BPF verifier requires every subprogram to end with exit or jmp.
-# With KEEP_INVOKE=1 this still matters after a noreturn call that is nounwind.
-# What follows a noreturn call that may unwind is dropped by the backend.
+# It matters after a noreturn call that is nounwind. What follows a noreturn call
+# that may unwind is dropped by the backend.
 #
 # A block that is nothing but 'unreachable' is left alone. It says that an edge
 # is never taken, e.g. the default of a switch over an Ordering, and LLVM emits

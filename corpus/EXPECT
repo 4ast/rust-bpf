@@ -1,0 +1,4 @@
+# tests that are not supposed to return 0: name, what run.c prints (prefix)
+smoke_fail check:
+smoke_panic panic:
+smoke_leak leak:1

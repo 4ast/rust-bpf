@@ -1,0 +1,23 @@
+[package]
+name = "rt"
+version = "0.0.0"
+edition = "2024"
+autoexamples = false
+autotests = false
+autobins = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = 2
+panic = "unwind"
+codegen-units = 1
+
+[[example]]
+name = "smoke"
+path = "tests-bpf/smoke.rs"
+crate-type = ["rlib"]

@@ -1,4 +1,6 @@
 target/
 bld/
 bld_deps/
+corpus/bld/
+corpus/vendor/
 config.mk

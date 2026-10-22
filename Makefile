@@ -27,6 +27,9 @@ TARGET := $(CURDIR)/bpfel-unknown-none-v4.json
 # Persistent across `rm -rf bld` — libcore/liballoc rebuilds dominate clean
 # builds (~22s), and these only depend on rustc/RUST_SRC, not on user code.
 DEPDIR := $(CURDIR)/bld_deps
+# Without Display and FromStr for f32 and f64. The schedulers don't use floats.
+# The corpus does: num-traits, serde and others don't compile without the impls.
+CORE_CFG ?= --cfg 'no_fp_fmt_parse'
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
 RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=$(RUSTC_THREADS)
@@ -77,7 +80,7 @@ $(warning skipping $(EH_PROGS): unwinding via r3 needs LLVM >= 24, LLVM_PREFIX i
 endif
 endif
 
-all: progs
+all: progs corpus
 progs: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS) $(EH_BUILD))) $(BLDDIR)/scxload
 
 # Loads a scheduler and attaches all of its programs.
@@ -85,12 +88,17 @@ $(BLDDIR)/scxload: scxload.c
 	@mkdir -p $(BLDDIR)
 	$(CC) -O2 -Wall $(if $(LIBBPF),-I$(LIBBPF)/include) -o $@ $< $(if $(LIBBPF),$(LIBBPF)/libbpf.a,-lbpf) -lelf -lz
 
+# The tests made of core, alloc and no_std crates, their controls on the host
+# and the loader that runs them.
+corpus:
+	$(MAKE) -C corpus all host run
+
 # --- core ---
 $(DEPDIR)/libcore.rlib: $(RUST_SRC)/core/src/lib.rs
 	@mkdir -p $(DEPDIR)
 	$(RUSTFLAGS_ENV) $(RUSTC) --edition 2024 --crate-type rlib $(RUSTC_COMMON) \
 		--sysroot=/dev/null \
-		--cfg 'no_fp_fmt_parse' \
+		$(CORE_CFG) \
 		--crate-name core \
 		--emit=link=$@ --emit=metadata=$(DEPDIR)/libcore.rmeta \
 		$<
@@ -335,10 +343,11 @@ $(foreach p,$(EH_PROGS),$(eval $(call EH_PROG_RULES,$(p))))
 
 clean:
 	rm -rf $(BLDDIR)
+	$(MAKE) -C corpus clean
 
 distclean: clean
 	rm -rf $(DEPDIR)
 
 .PRECIOUS: $(BLDDIR)/%.bc $(BLDDIR)/%-linked.bc $(BLDDIR)/%-reloc.bc $(BLDDIR)/%-opt.bc $(BLDDIR)/%-ksyms.bc
 
-.PHONY: all progs clean distclean FORCE
+.PHONY: all progs corpus clean distclean FORCE

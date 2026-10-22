@@ -10,6 +10,8 @@ TOP := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 # LLVM with register r12, the function table and the passes that keep the data
 # and the stack of a program in arena.
 LLVM_PREFIX ?= /w/llvm/llvm/bld/install
+# Only for corpus/shim.c. Any clang that knows may_goto.
+CLANG ?= $(LLVM_PREFIX)/bin/clang
 
 # RUSTC and RUST_SRC must come from the SAME rustc: libcore/liballoc use lang
 # items and built-in macros that only the exactly-matching compiler knows

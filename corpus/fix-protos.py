@@ -20,8 +20,6 @@ import re
 import sys
 
 MAX_NAME = 200
-# 5 registers and 7 slots of r11
-MAX_ARGS = 12
 
 
 def split_top(s):
@@ -127,7 +125,7 @@ for m in re.finditer(r'^define (internal|private) ([^@\n]*)@("[^"]+"|[\w.$]+)\('
     if nret > 2:
         nret, nargs = 0, nargs + 1
     # The rest is in the frame of the caller in arena. The kernel doesn't see it.
-    protos[dbg.group(1)] = (nret, min(nargs, MAX_ARGS))
+    protos[dbg.group(1)] = (nret, nargs)
 
 
 def fix(m):

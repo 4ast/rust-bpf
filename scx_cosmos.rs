@@ -694,18 +694,24 @@ fn keep_running(p: &TaskRef, cpu: i32) -> bool {
 #[allow(dead_code)]
 struct ScxExitInfo { /* opaque */ }
 
+/// What an op returns to the kernel. One without a value returns 0.
+trait OpRet { fn ret(self) -> i32; }
+impl OpRet for () { #[inline(always)] fn ret(self) -> i32 { 0 } }
+impl OpRet for i32 { #[inline(always)] fn ret(self) -> i32 { self } }
+
 macro_rules! bpf_prog {
-    ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? {$($t:tt)*}) => {
+    ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         #[link_section = $section]
         #[no_mangle]
         extern "C" fn $name(_ctx: *const u64) -> i32 {
+            #[inline(always)]
+            fn op($($arg: $ty),*) $(-> $ret)? $body
             let mut _i = 0usize;
             $(
                 #[allow(unused_assignments)]
                 let $arg = { let v = unsafe { *_ctx.add(_i) } as $ty; _i += 1; v };
             )*
-            { $($t)* };
-            0
+            OpRet::ret(op($($arg),*))
         }
     };
 }
@@ -761,11 +767,11 @@ bpf_prog!("struct_ops/cosmos_tick",
 fn cosmos_tick(p: *mut task_struct) {
     let p = TaskRef(p);
     let p = &p;
-    if !TICK_PREEMPT.load(Relaxed) { return 0; }
+    if !TICK_PREEMPT.load(Relaxed) { return; }
 
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return 0,
+        None => return,
     };
 
     if time_delta(now(), tctx.last_run_at) > task_slice(p) {
@@ -791,7 +797,7 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
 
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return 0,
+        None => return,
     };
 
     if GPU_ENABLED.load(Relaxed) && NUMA_ENABLED.load(Relaxed) &&
@@ -806,7 +812,7 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
                     scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
                 }
             }
-            return 0;
+            return;
         }
     }
 
@@ -820,7 +826,7 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
         if !p.is_running() {
             unsafe { scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE) };
         }
-        return 0;
+        return;
     }
 
     if task_should_migrate(p) ||
@@ -844,7 +850,7 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
             if cpu != prev_cpu || !p.is_running() {
                 unsafe { scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE) };
             }
-            return 0;
+            return;
         }
     }
 
@@ -856,7 +862,7 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
         if task_should_migrate(p) {
             unsafe { scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE) };
         }
-        return 0;
+        return;
     }
 
     let deadline = task_deadline(p, tctx);
@@ -872,11 +878,11 @@ fn cosmos_enqueue(p: *mut task_struct, enq_flags: u64) {
 bpf_prog!("struct_ops/cosmos_dispatch",
 fn cosmos_dispatch(cpu: i32, prev: *mut task_struct) {
     if unsafe { scx_bpf_dsq_move_to_local(shared_dsq(cpu)) } {
-        return 0;
+        return;
     }
 
     if prev.is_null() {
-        return 0;
+        return;
     }
     let prev = TaskRef(prev);
     let prev = &prev;
@@ -893,7 +899,7 @@ fn cosmos_runnable(p: *mut task_struct, _enq_flags: u64) {
     let t = now();
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return 0,
+        None => return,
     };
 
     tctx.exec_runtime = 0;
@@ -910,7 +916,7 @@ fn cosmos_running(p: *mut task_struct) {
     let p = &p;
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return 0,
+        None => return,
     };
 
     tctx.last_run_at = now();
@@ -929,7 +935,7 @@ fn cosmos_stopping(p: *mut task_struct, _runnable: u64) {
     let cpu = p.cpu();
     let tctx = match get_task_ctx(p.pid()) {
         Some(t) => t,
-        None => return 0,
+        None => return,
     };
 
     if PERF_CONFIG.load(Relaxed) != 0 || PERF_STICKY.load(Relaxed) != 0 {

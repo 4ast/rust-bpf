@@ -153,18 +153,24 @@ fn stat_inc(key: &'static str) {
 #[allow(dead_code)]
 struct ScxExitInfo { /* opaque */ }
 
+/// What an op returns to the kernel. One without a value returns 0.
+trait OpRet { fn ret(self) -> i32; }
+impl OpRet for () { #[inline(always)] fn ret(self) -> i32 { 0 } }
+impl OpRet for i32 { #[inline(always)] fn ret(self) -> i32 { self } }
+
 macro_rules! bpf_prog {
-    ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? {$($t:tt)*}) => {
+    ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         #[link_section = $section]
         #[no_mangle]
         extern "C" fn $name(_ctx: *const u64) -> i32 {
+            #[inline(always)]
+            fn op($($arg: $ty),*) $(-> $ret)? $body
             let mut _i = 0usize;
             $(
                 #[allow(unused_assignments)]
                 let $arg = { let v = unsafe { *_ctx.add(_i) } as $ty; _i += 1; v };
             )*
-            { $($t)* };
-            0
+            OpRet::ret(op($($arg),*))
         }
     };
 }
@@ -204,7 +210,7 @@ bpf_prog!("struct_ops/simple_running",
 fn simple_running(p: *mut task_struct) {
     let p = TaskRef(p);
     if FIFO_SCHED.load(Relaxed) {
-        return 0;
+        return;
     }
     let vtime = p.scx_dsq_vtime();
     if VTIME_NOW.load(Relaxed) < vtime {
@@ -216,7 +222,7 @@ bpf_prog!("struct_ops/simple_stopping",
 fn simple_stopping(p: *mut task_struct, _runnable: u64) {
     let p = TaskRef(p);
     if FIFO_SCHED.load(Relaxed) {
-        return 0;
+        return;
     }
     let delta = (SCX_SLICE_DFL - p.scx_slice()) * 100 / p.scx_weight() as u64;
     p.set_scx_dsq_vtime(p.scx_dsq_vtime() + delta);

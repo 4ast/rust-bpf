@@ -18,6 +18,56 @@ panic = "unwind"
 codegen-units = 1
 
 [[example]]
+name = "c_atomic"
+path = "tests-bpf/c_atomic.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_fmt"
+path = "tests-bpf/c_fmt.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_hash"
+path = "tests-bpf/c_hash.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_int"
+path = "tests-bpf/c_int.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_iter"
+path = "tests-bpf/c_iter.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_lang"
+path = "tests-bpf/c_lang.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_mem"
+path = "tests-bpf/c_mem.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_misc"
+path = "tests-bpf/c_misc.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_slice"
+path = "tests-bpf/c_slice.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "c_str"
+path = "tests-bpf/c_str.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "smoke"
 path = "tests-bpf/smoke.rs"
 crate-type = ["rlib"]

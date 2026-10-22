@@ -63,6 +63,11 @@ path = "tests-bpf/c_misc.rs"
 crate-type = ["rlib"]
 
 [[example]]
+name = "c_panic"
+path = "tests-bpf/c_panic.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "c_slice"
 path = "tests-bpf/c_slice.rs"
 crate-type = ["rlib"]

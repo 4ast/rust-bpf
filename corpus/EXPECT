@@ -2,3 +2,4 @@
 smoke_fail check:
 smoke_panic panic:
 smoke_leak leak:1
+panic_uncaught panic:

@@ -18,6 +18,31 @@ panic = "unwind"
 codegen-units = 1
 
 [[example]]
+name = "a_btree"
+path = "tests-bpf/a_btree.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "a_coll"
+path = "tests-bpf/a_coll.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "a_rc"
+path = "tests-bpf/a_rc.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "a_string"
+path = "tests-bpf/a_string.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "a_vec"
+path = "tests-bpf/a_vec.rs"
+crate-type = ["rlib"]
+
+[[example]]
 name = "c_abi"
 path = "tests-bpf/c_abi.rs"
 crate-type = ["rlib"]

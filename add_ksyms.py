@@ -21,7 +21,7 @@
 #
 # Usage: add_ksyms.py input.ll output.ll
 
-import os, re, subprocess, sys
+import hashlib, os, re, subprocess, sys
 
 text = open(sys.argv[1]).read()
 
@@ -44,6 +44,31 @@ if os.environ.get('KERNEL_BTF'):
         sanitize_name,
         text,
     )
+
+# A BTF name is limited to KSYM_NAME_LEN - 1 = 511 characters, or the kernel
+# rejects the whole .BTF section ("Invalid name"). The name of a monomorphised
+# function spells out all of its type arguments and gets longer than that, e.g.
+# do_merge<> of a BTreeMap whose values are boxed. Cut such a name and add a
+# hash of all of it, so that different names stay different.
+BTF_NAME_MAX = 511
+
+
+def shorten_name(m):
+    head, name = m.group(1), m.group(2)
+    if len(name) <= BTF_NAME_MAX:
+        return m.group(0)
+    digest = hashlib.sha1(name.encode()).hexdigest()[:16]
+    # Do not cut an escape like \22 in two.
+    cut = re.sub(r'\\[0-9A-Fa-f]?$', '', name[:200])
+    return f'{head}"{cut}...{digest}"'
+
+
+text = re.sub(
+    r'(!(?:DICompositeType|DIBasicType|DIDerivedType|DIEnumerator|'
+    r'DISubprogram)\([^)]*?\bname:\s*)"([^"]*)"',
+    shorten_name,
+    text,
+)
 
 # Find the highest existing metadata ID so we can append new ones.
 max_id = max((int(m[1:]) for m in re.findall(r'!\d+', text)), default=0)

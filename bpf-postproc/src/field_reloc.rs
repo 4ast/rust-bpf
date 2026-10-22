@@ -5,7 +5,7 @@ use llvm_sys::{
     LLVMOpcode,
     core::{
         LLVMAddCallSiteAttribute, LLVMBuildCall2, LLVMConstInt, LLVMCreateBuilderInContext,
-        LLVMCreateTypeAttribute, LLVMDisposeBuilder, LLVMGetArgOperand, LLVMGetCalledValue,
+        LLVMCreateTypeAttribute, LLVMDisposeBuilder, LLVMGetCalledValue,
         LLVMGetEnumAttributeKindForName, LLVMGetInstructionOpcode, LLVMGetIntrinsicDeclaration,
         LLVMGetMDKindIDInContext, LLVMGetNumArgOperands, LLVMGetOperand, LLVMGlobalGetValueType,
         LLVMInstructionEraseFromParent, LLVMInt8TypeInContext, LLVMInt32TypeInContext,
@@ -116,7 +116,7 @@ impl<'ctx, 'module> FieldRelocPass<'ctx, 'module> {
             return Err(FieldRelocError::InvalidPolyfillArity(symbol));
         }
 
-        let base = unsafe { LLVMGetArgOperand(call, 0) };
+        let base = unsafe { LLVMGetOperand(call, 0) };
 
         // The call is generated inside an always-inlined polyfill helper whose
         // first parameter is the carrier pointer and whose second parameter is

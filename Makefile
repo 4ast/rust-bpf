@@ -36,7 +36,12 @@ RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2
 # emitted by #[btf_tag] into debug-info annotations.
 TAG_PROGS := type_tag_test decl_tag_test
 
-PROGS := scx_simple scx_cosmos $(TAG_PROGS)
+# Schedulers ported from C on top of scx_common.rs, the counterpart of
+# scx/common.bpf.h. Every symbol that has to survive internalize starts with
+# the name of the scheduler: its ops, its syscall programs, its maps.
+SCX_PORTS :=
+
+PROGS := scx_simple scx_cosmos $(addprefix scx_,$(SCX_PORTS)) $(TAG_PROGS)
 
 # Programs that let a panic unwind through Rust Drop impls. These need a
 # backend that lowers unwinding to a flag in r3 and a branch ("[BPF] Lower
@@ -154,6 +159,8 @@ $(BLDDIR)/%.bc: %.rs $(DEPDIR)/liballoc.rlib $(DEPDIR)/libbtf.rlib $(BLDDIR)/lib
 		--crate-name $(basename $(notdir $<)) \
 		--emit=llvm-bc -o $@ $<
 
+$(foreach p,$(SCX_PORTS),$(BLDDIR)/scx_$(p).bc): scx_common.rs
+
 # --- Extract .rlib contents for linking ---
 $(DEPDIR)/extracted: $(DEPDIR)/libcore.rlib $(DEPDIR)/libcompiler_builtins.rlib $(DEPDIR)/liballoc.rlib
 	@mkdir -p $(DEPDIR)/extracted
@@ -196,9 +203,10 @@ KEEP_SYMS := simple_ops \
              cosmos_init cosmos_exit \
              type_tag_entry TASK_TABLE \
              decl_tag_entry tagged_subprog SLOT \
+             $(addsuffix _*,$(SCX_PORTS)) \
              __multi3 memset \
              _LICENSE
-INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list=$(s))
+INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list='$(s)')
 $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
 	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold \
 		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@

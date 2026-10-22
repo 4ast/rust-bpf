@@ -333,3 +333,8 @@ crate-type = ["rlib"]
 name = "smoke"
 path = "tests-bpf/smoke.rs"
 crate-type = ["rlib"]
+
+[[example]]
+name = "x_control"
+path = "tests-bpf/x_control.rs"
+crate-type = ["rlib"]

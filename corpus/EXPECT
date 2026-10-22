@@ -3,3 +3,16 @@ smoke_fail check:
 smoke_panic panic:
 smoke_leak leak:1
 panic_uncaught panic:
+ctl_u128_div check:17
+ctl_iter check:22
+ctl_str check:27
+ctl_fmt check:32
+ctl_atomic check:38
+ctl_float check:43
+ctl_vec check:49
+ctl_btree check:58
+ctl_drop check:66
+ctl_catch check:71
+ctl_sha256 check:77
+ctl_hashmap check:86
+ctl_serde check:91

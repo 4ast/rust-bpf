@@ -55,12 +55,14 @@ PROGS := scx_simple scx_cosmos $(TAG_PROGS)
 # liballoc's btree::mem::replace(). That is llvm.trap, which llc emits as
 # __bpf_trap, and the verifier rejects a program that can reach it. It is one
 # more panic that cannot unwind, so it ends like the others
-# (TRAP_TO_BPF_THROW=1, the cookie the panic handlers use).
+# (TRAP_TO_BPF_THROW=1, the cookie the panic handlers use). Except where the
+# function may unwind: there it unwinds (TRAP_TO_UNWIND=1), because bpf_throw is
+# refused while a caller holds interrupt flags, an RCU section or a reference.
 EH_PROGS := exc_cleanup
 ifeq ($(shell test "$(LLVM_MAJOR)" -ge 24 2>/dev/null && echo yes),yes)
 EH_BUILD := $(EH_PROGS)
 UNWIND_CFG := --cfg bpf_unwind
-KSYMS_ENV := KEEP_INVOKE=1 TRAP_TO_BPF_THROW=1
+KSYMS_ENV := KEEP_INVOKE=1 TRAP_TO_UNWIND=1 TRAP_TO_BPF_THROW=1
 else
 EH_BUILD :=
 UNWIND_CFG :=

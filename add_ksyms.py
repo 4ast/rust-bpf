@@ -473,6 +473,49 @@ for old, new in libcall_renames.items():
 # __bpf_trap. bpf_throw is the sanctioned "abort this program" mechanism:
 # the program cleanly returns the cookie instead. Enabled per-pipeline via
 # TRAP_TO_BPF_THROW=<cookie> (rust-selftests/collections sets it).
+#
+# TRAP_TO_UNWIND=1 goes first and takes the traps of the functions that may
+# unwind: there the trap starts an unwind, like a panic. An abort is not supposed
+# to run any Drop, but bpf_throw is refused by the verifier while interrupt
+# flags, an RCU section, a lock or a reference are held, and the callers that
+# hold them release them in their landing pads. What the function with the trap
+# holds itself is not released, so the guard has to be in a caller. A function
+# that is nounwind keeps its trap: its callers have no landing pads.
+#
+# The same goes for the panics of core that must not unwind and end in bpf_throw
+# in the panic handler. The one that matters is panic_in_cleanup(): rustc calls
+# it when a Drop that runs in a landing pad unwinds, and as far as it knows the
+# Drop of an Arc or of a Box<dyn ..> may. Their message is lost.
+NOUNWIND_PANIC = re.compile(
+    r'(tail\s+)?call (?:fastcc )?void @_R\w*4core9panicking\d+panic_(?:in_cleanup|cannot_unwind)\(\)( #\d+)?')
+
+
+def trap_to_unwind(text):
+    nounwind_groups = set(
+        m.group(1) for m in re.finditer(r'^attributes #(\d+) = \{([^}]*)\}', text, re.M)
+        if re.search(r'\bnounwind\b', m.group(2)))
+    out, may_unwind, n = [], False, 0
+    for line in text.split('\n'):
+        if line.startswith('define '):
+            groups = re.findall(r'#(\d+)', line.rsplit(')', 1)[-1])
+            may_unwind = (not any(g in nounwind_groups for g in groups)
+                          and not re.search(r'\)[^)]*\bnounwind\b', line))
+        if may_unwind and re.search(r'call void @llvm\.trap\(\)', line):
+            n += 1
+            line = re.sub(r'(tail\s+)?call void @llvm\.trap\(\)( #\d+)?',
+                          f'%__trap.{n} = call i32 @_Unwind_RaiseException(ptr null)', line)
+        elif may_unwind and NOUNWIND_PANIC.search(line):
+            n += 1
+            line = NOUNWIND_PANIC.sub(
+                f'%__trap.{n} = call i32 @_Unwind_RaiseException(ptr null)', line)
+        out.append(line)
+    return '\n'.join(out)
+
+
+if (os.environ.get('TRAP_TO_UNWIND') and os.environ.get('KEEP_INVOKE')
+        and re.search(r'^declare .*@_Unwind_RaiseException\(', text, re.M)):
+    text = trap_to_unwind(text)
+
 trap_cookie = os.environ.get('TRAP_TO_BPF_THROW')
 if trap_cookie and re.search(r'call void @llvm\.trap\(\)', text):
     text = re.sub(r'(tail\s+)?call void @llvm\.trap\(\)',

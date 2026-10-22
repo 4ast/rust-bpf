@@ -606,11 +606,27 @@ if not keep_invoke:
 # BPF verifier requires every subprogram to end with exit or jmp.
 # With KEEP_INVOKE=1 this still matters after a noreturn call that is nounwind.
 # What follows a noreturn call that may unwind is dropped by the backend.
+#
+# A block that is nothing but 'unreachable' is left alone. It says that an edge
+# is never taken, e.g. the default of a switch over an Ordering, and LLVM emits
+# no code for such an edge. Turned into 'ret' it would become a real way out of
+# the function, past every Drop: the verifier cannot tell that it is never
+# taken and rejects it when a reference, a lock or saved interrupt flags are
+# held at that point.
 def fix_unreachable(text):
     lines = text.split('\n')
     out = []
     ret_type = 'void'
+    at_block_start = False
     for line in lines:
+        was_at_block_start = at_block_start
+        if re.match(r'[-\w.$"]+:', line):
+            at_block_start = True
+        elif not re.match(r'\s*(#dbg_|;|$)', line):
+            at_block_start = False
+        if was_at_block_start and re.match(r'  +unreachable', line):
+            out.append(line)
+            continue
         m = re.match(r'define\s.*?\s+(@\S+)\(', line)
         if m:
             # the return type is the last token before '@name('; attributes

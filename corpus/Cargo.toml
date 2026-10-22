@@ -338,3 +338,8 @@ crate-type = ["rlib"]
 name = "x_control"
 path = "tests-bpf/x_control.rs"
 crate-type = ["rlib"]
+
+[[example]]
+name = "z_kptr"
+path = "tests-bpf/z_kptr.rs"
+crate-type = ["rlib"]

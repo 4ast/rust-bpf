@@ -5,6 +5,8 @@ BPF specific framework. The compiler keeps the data and the stack of a program
 in a BPF arena, so that references, `Box`, `Vec`, `BTreeMap`, trait objects,
 closures, recursion and unwinding work the way they do everywhere else.
 
+What works today, in numbers: [STATUS.md](STATUS.md).
+
 | what | where |
 |---|---|
 | sched_ext schedulers | `scx_*.rs`. `scx_simple.rs` and `scx_cosmos.rs` stand alone, the others are ports of C schedulers on top of `scx_common.rs`, the counterpart of `scx/common.bpf.h`. The comment at the top of each says what it was ported from, how maps and kptrs were replaced and what was left out |

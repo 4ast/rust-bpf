@@ -86,6 +86,22 @@ glam = { version = "0.34.1", default-features = false, features = ["libm"] }
 num-bigint = { version = "0.5.1", default-features = false }
 num-rational = { version = "0.4.2", default-features = false }
 adler2 = { version = "2.0.1", default-features = false }
+intrusive-collections = { version = "0.10.3", default-features = false, features = ["alloc"] }
+lru = { version = "0.19.0", default-features = false, features = ["hashbrown"] }
+rpds = { version = "1.2.1", default-features = false }
+zerocopy = { version = "0.8.63", default-features = false, features = ["derive"] }
+etherparse = { version = "0.21.0", default-features = false }
+chrono = { version = "0.4.45", default-features = false, features = ["alloc"] }
+lexical-core = { version = "1.0.6", default-features = false, features = ["parse-integers", "parse-floats", "write-integers", "write-floats"] }
+xxhash-rust = { version = "0.8.19", default-features = false, features = ["xxh32", "xxh64", "xxh3"] }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
+nalgebra = { version = "0.35.0", default-features = false, features = ["libm"] }
+rustc-hash = { version = "2.1.3", default-features = false }
+typed-arena = { version = "2.0.2", default-features = false }
+logos = { version = "0.16.1", default-features = false, features = ["export_derive"] }
+derive_more = { version = "2.1.1", default-features = false, features = ["display", "from", "add", "into", "deref"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+smoltcp = { version = "0.14.0", default-features = false, features = ["proto-ipv4", "medium-ethernet", "socket-udp"] }
 
 [profile.release]
 opt-level = 3
@@ -216,6 +232,31 @@ crate-type = ["rlib"]
 [[example]]
 name = "k2_text"
 path = "tests-bpf/k2_text.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k3_coll"
+path = "tests-bpf/k3_coll.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k3_crypto"
+path = "tests-bpf/k3_crypto.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k3_macro"
+path = "tests-bpf/k3_macro.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k3_net"
+path = "tests-bpf/k3_net.rs"
+crate-type = ["rlib"]
+
+[[example]]
+name = "k3_num"
+path = "tests-bpf/k3_num.rs"
 crate-type = ["rlib"]
 
 [[example]]

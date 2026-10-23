@@ -4,11 +4,11 @@ How much Rust compiles to BPF and runs in the kernel today.
 
 | | |
 |---|---|
-| sched_ext schedulers | 16, with 223 BPF programs. 16,500 lines of Rust, 374,000 BPF insns. All 223 load. All 16 schedule an 8 CPU VM under load. |
-| tests | 435 programs, 907,000 BPF insns. 431 load. 421 return what the same test returns on x86-64. |
+| sched_ext schedulers | 16, with 225 BPF programs. 16,700 lines of Rust, 387,000 BPF insns. All 225 load. All 16 schedule an 8 CPU VM under load. |
+| tests | 437 programs, 909,000 BPF insns. 433 load. 430 return what the same test returns on x86-64. |
 | crates | 92 from crates.io, 177 with their dependencies. Not patched. 91 have a test that passes. |
 | rustc | nightly from rustup. Not patched. `core` and `alloc` are built from `rust-src`. Not patched. |
-| BPF specific source | None in the tests, but for the 10 that call kfuncs: the same files are compiled for the host as a control. |
+| BPF specific source | None in the tests, but for the 10 that call kfuncs and the 2 that abort: the same files are compiled for the host as a control. |
 
 It needs an LLVM and a kernel that are [not upstream yet](#where-the-pieces-are).
 How to build and run: [README.md](README.md).
@@ -92,15 +92,15 @@ it is measured with.
 | loops | bounded in a way that the verifier can see, or written with `bpf_for`, `bpf_loop()`, `can_loop` | any loop that has an exit |
 | recursion | rejected | allowed, limited at run time |
 | calls | direct. `callx` is new in bpf-next. | function pointers, `&dyn Trait`, `Box<dyn Fn>`, vtables in static data |
-| arguments | 5, 12 in bpf-next | as many as the ABI needs. The helpers of `derive(Debug)` take up to 23 registers worth. |
+| arguments | 5, 12 in bpf-next | 24. The helpers of `derive(Debug)` take up to 23 registers worth. |
 | cleanup | the source has an error path for every acquire, or the verifier complains. Unwinding is new in bpf-next. | `Drop` releases references, RCU sections and interrupt flags on every path, a panic included. |
 | bounds | the program has to convince the verifier that an index is in bounds | the bounds check is in the code. When it fails it panics. `panic!`, `unwrap()` and overflow checks unwind through landing pads, and a panic can be caught. |
-| size | 1 million insns and 8192 pending jumps per program for the verifier | no such limits. The largest program has 98,044 insns and 623 functions. |
+| size | 1 million insns and 8192 pending jumps per program for the verifier | no such limits. The largest program has 98,169 insns and 620 functions. |
 | arithmetic | no floats, no 128 bit division | soft float, `u128`/`i128`, libm, from `compiler_builtins` |
 
 ## The language, core and alloc
 
-251 tests (`corpus/tests-bpf/c_*.rs`, `a_*.rs`).
+253 tests (`corpus/tests-bpf/c_*.rs`, `a_*.rs`).
 
 | | what is tested | tests |
 |---|---|---|
@@ -111,7 +111,7 @@ it is measured with.
 | memory | `mem`, `ptr`, `Cell`, `RefCell`, `MaybeUninit`, unions, packed structs, `Pin`, `Any`, big locals | 16 |
 | atomics | `u8` to `u64`, `bool`, pointers, fences, a spin lock | 14 |
 | floats | `f32`, `f64`, conversions, `Display`, `FromStr`, libm | 10 |
-| panics | where they come from, what they unwind through, `Drop` order, nested `catch`, out of memory | 16 |
+| panics | where they come from, what they unwind through, `Drop` order, nested `catch`, out of memory, aborts | 18 |
 | recursion | factorial, Fibonacci, Ackermann, Hanoi, mutual, through `dyn`, trees, quicksort, a recursive descent parser, unwinding through 100 frames | 33 |
 | `async`/`await` | state across `await`, cancelled futures, boxed recursion, `Arc` and raw wakers, a round robin executor, a channel | 8 |
 | calling conventions | 16 arguments, `u128` arguments, structs by value, hidden result pointers, `extern "C"`, `dyn` | 13 |
@@ -161,44 +161,45 @@ The largest programs:
 
 | test | BPF insns | insns the verifier processed |
 |---|---|---|
-| regex_automata | 98,044 | 289,557 |
-| aho_corasick | 39,700 | 110,249 |
-| num_bigint_rational | 25,383 | 110,610 |
-| json_deserialize | 17,491 | 48,287 |
-| chrono_dates | 13,810 | 48,904 |
-| uuid_semver | 12,343 | 31,386 |
-| fmt_debug_std_types | 12,091 | 30,321 |
+| regex_automata | 98,169 | 289,661 |
+| aho_corasick | 39,674 | 110,028 |
+| num_bigint_rational | 25,418 | 109,852 |
+| json_deserialize | 17,557 | 48,471 |
+| chrono_dates | 13,769 | 48,849 |
+| uuid_semver | 12,543 | 31,413 |
+| fmt_debug_std_types | 12,080 | 31,616 |
 
 ## Schedulers
 
 `scx_simple.rs` and `scx_cosmos.rs` stand alone. The other 14 are ports of C
-schedulers on top of `scx_common.rs` (1,359 lines), the counterpart of
+schedulers on top of `scx_common.rs` (1,389 lines), the counterpart of
 `scx/common.bpf.h`. The head of each file lists what became what and what was
 left out.
 
 | | from | Rust lines | programs | BPF insns | verifier, ms | what it uses |
 |---|---|---|---|---|---|---|
-| simple | | 347 | 8 | 5,618 | 35 | `BTreeMap` |
-| cosmos | sched-ext/scx | 1,147 | 12 | 6,227 | 37 | `BTreeMap`, arrays |
-| cpu0 | tools/sched_ext | 87 | 5 | 60 | 0 | |
-| central | tools/sched_ext | 367 | 7 | 3,388 | 43 | `SpinLock<VecDeque>`, `Vec` sized in `ops.init()` |
-| flatcg | tools/sched_ext | 714 | 15 | 17,858 | 386 | `BTreeMap<u64, Arc<CgrpCtx>>`, `BinaryHeap`, recursion down the cgroup tree |
-| pair | tools/sched_ext | 476 | 7 | 9,408 | 176 | `Vec<SpinLock<PairCtx>>`, `enum Outcome` |
-| sdt | tools/sched_ext | 369 | 8 | 10,333 | 276 | a generic radix tree allocator: `Node<T>`, `enum Entries<T>`, recursion |
-| qmap | tools/sched_ext | 1,473 | 23 | 82,379 | 743 | cid form of the ops, sub-schedulers, `BTreeMap` FIFOs, a table of timer functions |
-| bpfland | sched-ext/scx | 828 | 13 | 16,797 | 169 | `TaskMap`, `CpuSet`, `Option<Box<CpuSet>>` |
-| tickless | sched-ext/scx | 489 | 14 | 11,914 | 148 | `DsqIter` as an `Iterator`, `Vec` sorted by capacity |
-| beerland | sched-ext/scx | 656 | 14 | 15,096 | 132 | `Vtime` whose `Ord` wraps |
-| flash | sched-ext/scx | 766 | 17 | 35,090 | 328 | `trait Policy`, used through `&dyn Policy` |
-| rusty | sched-ext/scx | 1,122 | 14 | 30,027 | 345 | `Vec<Domain>`, 128 bit running averages, `Result` and `?` |
-| p2dq | sched-ext/scx, the core | 1,393 | 12 | 21,478 | 291 | `enum Promise` with data, `BTreeMap<(vtime, pid), ()>`, function pointers |
-| mitosis | sched-ext/scx, the core | 970 | 17 | 43,686 | 645 | `Arc<Config>` swapped as a whole, `Vec<Vec<Match>>`, `String`, `core::fmt` in `ops.dump()` |
-| lavd | sched-ext/scx | 3,989 | 37 | 65,136 | 816 | a Rust module per C file, fexit and tracepoint programs, a ring buffer |
+| simple | | 375 | 8 | 6,186 | 42 | `BTreeMap` |
+| cosmos | sched-ext/scx | 1,213 | 14 | 8,841 | 61 | `BTreeMap`, arrays, 28 tunables and tables for user space |
+| cpu0 | tools/sched_ext | 86 | 5 | 135 | 1 | |
+| central | tools/sched_ext | 366 | 7 | 3,712 | 48 | `SpinLock<VecDeque>`, `Vec` sized in `ops.init()` |
+| flatcg | tools/sched_ext | 713 | 15 | 18,809 | 277 | `BTreeMap<u64, Arc<CgrpCtx>>`, `BinaryHeap`, recursion down the cgroup tree |
+| pair | tools/sched_ext | 475 | 7 | 9,857 | 169 | `Vec<SpinLock<PairCtx>>`, `enum Outcome` |
+| sdt | tools/sched_ext | 368 | 8 | 10,648 | 283 | a generic radix tree allocator: `Node<T>`, `enum Entries<T>`, recursion |
+| qmap | tools/sched_ext | 1,482 | 23 | 84,008 | 730 | cid form of the ops, sub-schedulers, `BTreeMap` FIFOs, a table of timer functions |
+| bpfland | sched-ext/scx | 827 | 13 | 17,786 | 182 | `TaskMap`, `CpuSet`, `Option<Box<CpuSet>>` |
+| tickless | sched-ext/scx | 488 | 14 | 12,596 | 166 | `DsqIter` as an `Iterator`, `Vec` sorted by capacity |
+| beerland | sched-ext/scx | 655 | 14 | 15,895 | 147 | `Vtime` whose `Ord` wraps |
+| flash | sched-ext/scx | 765 | 17 | 34,094 | 261 | `trait Policy`, used through `&dyn Policy` |
+| rusty | sched-ext/scx | 1,121 | 14 | 30,166 | 321 | `Vec<Domain>`, 128 bit running averages, `Result` and `?` |
+| p2dq | sched-ext/scx, the core | 1,392 | 12 | 22,186 | 225 | `enum Promise` with data, `BTreeMap<(vtime, pid), ()>`, function pointers |
+| mitosis | sched-ext/scx, the core | 969 | 17 | 45,401 | 670 | `Arc<Config>` swapped as a whole, `Vec<Vec<Match>>`, `String`, `core::fmt` in `ops.dump()` |
+| lavd | sched-ext/scx | 3,990 | 37 | 66,733 | 847 | a Rust module per C file, fexit and tracepoint programs, a ring buffer |
 
-All 223 programs are verified in 4.6 seconds together.
+All 225 programs are verified in 4.4 seconds together.
 
 There is no user space part. What the loader of the original provides
 (topology, domains, tunables) is probed or computed in `ops.init()`.
+`scxload -s` sets a tunable.
 
 Each scheduler is registered with `bpftool struct_ops register`, gets a load of
 24 busy loops, 1,500 forks, pinned tasks and a pipe, and is unregistered. All
@@ -208,15 +209,26 @@ A check that a scheduler does what it is for: scx_pair with 2 cgroups of 6 busy
 loops each. In 300 samples of what all CPUs run, the two CPUs of a pair were
 seen in different cgroups 0 times. Without the scheduler 287 times.
 
+A scheduler ends when one of its programs is unwound. The entry of every program
+holds a guard whose `Drop` calls `scx_bpf_error()`: the kernel disables the
+scheduler and hands the tasks back to the fair class. Injected into scx_qmap
+under load:
+
+| | without the guard | with it |
+|---|---|---|
+| `panic!` in `ops.enqueue()` | "runnable task stall" after 5 s | "qmap_enqueue was unwound" at once |
+| a loop in `ops.enqueue()` that does not end | "runnable task stall" after 5 s | "qmap_enqueue was unwound" after 250 ms |
+| `panic!` in the callback of a timer | stays enabled with a dead timer | "timer_cb was unwound" at once |
+
 ## How a test runs
 
 ```
 tests-bpf/*.rs ── cargo + rustc ──> bitcode of the test, the crates, core, alloc
    llvm-link        one module, only what the test needs
-   opt -O2          internalize, inline, remove what is dead
+   opt -O2          internalize, inline, remove what is dead. No function is nounwind.
    link-builtins.sh soft float, 128 bit division, libm, as far as llc asks for them
    opt              bpf-func-table, bpf-arena-data, bpf-arena-stack
-   add_ksyms.py     kfuncs get prototypes from the BTF of the kernel
+   add_ksyms.py     kfuncs get prototypes from the BTF of the kernel, aborts unwind
    fix-protos.py    BTF prototypes of functions from their IR signature
    llc              -mcpu=v4 -mattr=+arena-stack,+arena-data
    corpus/run       libbpf loads the program, BPF_PROG_TEST_RUN runs it
@@ -227,11 +239,11 @@ failed, 100000 + the line of a panic, or 200000 + the number of allocations that
 were not freed. So every test is a leak test too.
 
 The same file is compiled for x86-64 and run there. A test counts when it
-returns what is expected on both. A test that the kernel cuts short returns 77
-and counts as failed.
+returns what is expected on both. A test that the kernel cuts short counts as
+failed whatever it returns: the kernel marks the program.
 
 `./run-tests.sh` boots a VM, does all of the above for the 16 schedulers and
-the 435 tests in about 6 minutes and prints the tables that the numbers here
+the 437 tests in about 6 minutes and prints the tables that the numbers here
 are from.
 
 ## What it took
@@ -253,11 +265,13 @@ LLVM BPF backend, on top of LLVM 24.
   index of the function in a read-only table. An indirect call is `callx`
   through the table, with the index clamped to the functions of the type of the
   call.
-- **Unwinding.** A call that may unwind returns a flag in r3, the caller
-  branches to its landing pad. `_Unwind_RaiseException` starts it, like
-  on other architectures.
-- **Arguments.** r1-r5, then 7 slots of r11, the rest in the arena frame of the
-  caller.
+- **Unwinding.** Two insns. `call f; unwind_goto pad` goes to the landing pad
+  when f left with `unwind_exit` and falls through when it left with `exit`. No
+  register says which one it was, and the normal path costs nothing.
+  `_Unwind_RaiseException` starts an unwind, like on other architectures.
+  A landing pad is ordinary code for the verifier: one that forgets to drop
+  a lock is a leak on that path.
+- **Arguments.** r1-r5, then slots of r11.
 - **Pointers of the kernel.** A task or a cpumask is a pointer for the verifier
   while it is in a register or on the BPF stack. In arena it is a number.
   `bpf-arena-kptr` keeps the locals that hold one on the BPF stack, closure
@@ -286,19 +300,31 @@ LLVM BPF backend, on top of LLVM 24.
   - Loops: scalar evolution counts them. What it cannot count is walked for
     a while. The rest gets a `may_goto` that the verifier inserts.
     Termination is not proved. A loop without an exit is rejected.
-  - Recursion is allowed. The verifier inserts a check of the stack that is left.
-  - 1024 functions per program. More than 16 frames when they fit in the stack.
+  - Recursion is allowed. The verifier inserts a check of the stack that is
+    left: 4 Kbyte for recursive frames.
+  - 1024 functions per program, 32 call frames, 24 arguments of a static function.
   - C programs gain too. Of the 3,597 programs of the kernel selftests that the
     current verifier loads it loses 1. It loads 19 more, and processes 2.2
     million insns instead of 5.2 million.
-- **A program that runs out of budget says so.** It ends, a counter goes up, and
-  its stderr stream gets a backtrace with Rust source lines:
+- **A program that runs out of budget is unwound.** It cannot just stop: what it
+  holds has to be released. The function with the loop or the recursion leaves
+  with `unwind_exit`, the landing pads of the callers run, and the program
+  returns 0. No return value is right for every kind of program, so the kernel
+  marks the program as unwound in `struct bpf_prog_info` and user space has to
+  act. Its stderr stream says why, with Rust source lines:
 
   ```
   ERROR: No room in the stack for a call of a recursive function
-  bpf_prog_477fcbd246dabbb7_sum_to+0xaf/0x103
+  bpf_prog_a81793565f7e0c47_sum_to+0x57/0x166
+    fn sum_to(n: u64) -> u64 { @ c_deep.rs:14
+  bpf_prog_a81793565f7e0c47_sum_to+0xd8/0x166
     bb(sum_to(bb(n - 1))) + n @ c_deep.rs:18
   ```
+
+  There is no landing pad for a loop in a function that holds a reference,
+  an RCU section or interrupt flags itself. Such a loop is left. Of the 3,414
+  `may_goto` that the verifier added to the 225 programs of the schedulers 71 are
+  of that kind.
 - `bpf_alloc()`, `bpf_free()`: the heap. `bpf_arena_memcpy()`,
   `bpf_arena_memcmp()`.
 
@@ -310,20 +336,23 @@ LLVM BPF backend, on top of LLVM 24.
   `extern "C"` of rustc and the calls that LLVM makes disagree: 128 bit values.
 - `#[btf]` and `bpf-postproc`: CO-RE relocations for fields of kernel structs.
 - `add_ksyms.py`: kfunc prototypes from kernel BTF, names that are too long for
-  BTF, aborts that unwind where `bpf_throw()` is not allowed.
+  BTF, aborts that unwind.
+- No function is `nounwind`. The kernel can unwind a function when `unwind_goto`
+  follows every call of it, so LLVM must not conclude that a function without
+  a panic in it cannot unwind: the callers would lose their landing pads. It
+  costs 1.0% more insns in the schedulers and 0.5% in the tests.
+- No `bpf_throw()`. It is refused while something is held, and the compiler
+  cannot see where that is.
 - BTF prototypes from the IR signature. Debug info describes the source, the code
   follows the Rust ABI: hidden result pointers, pairs in two registers, no
   register for a zero sized argument.
 
 ## What does not work yet
 
-14 of the 435 tests:
+7 of the 437 tests:
 
-- 10 run out of the 2 Kbyte budget for recursive frames at run time:
-  `sum_to(64)` and deeper, `Drop` and the length of a linked list of 100 nodes,
-  `Debug` of 20 nested nodes, a parser 50 levels deep, unwinding through 100
-  frames, the stable sort in `BTreeMap::from_iter()` of 500 elements,
-  regex-automata (passes with 8 Kbyte).
+- 3 run out of the 4 Kbyte for recursive frames at run time: `sum_to(128)`,
+  `sum_to(1000)`, regex-automata.
 - 3 keep a pointer of the kernel where the verifier loses it: `[Task; 4]` with
   a variable index, one method behind a vtable called on an object on the stack
   and on one on the heap, `Box<Task>`.
@@ -331,9 +360,10 @@ LLVM BPF backend, on top of LLVM 24.
 
 And:
 
-- An abort (a panic in a `Drop` during unwinding, a panic in a function that
-  cannot unwind) ends in `bpf_throw()`, which is refused while something is held
-  and in callbacks. `add_ksyms.py` and `scx_common.rs` work around it.
+- An abort (`abort()`, a panic in a function that must not unwind) unwinds. The
+  frames that have no landing pad for the call are skipped: their `Drop` impls
+  do not run. A frame that holds something that the kernel knows about has to
+  have one, or the verifier rejects the program.
 - CO-RE covers offsets of fields. kfuncs are declared by hand and are not weak,
   `SCX_*` constants are written down, not read from BTF.
 - The schedulers are ports of the BPF side. p2dq and mitosis are the core only.
@@ -349,11 +379,11 @@ The list with details: [README.md](README.md#known-not-to-work).
 |---|---|
 | `callx`, 12 arguments, 16 call frames, unwinding, scalar evolution | in bpf-next |
 | arena stack (r12), casts of any pointer, data in arena, libbpf side | patches, not upstream yet |
-| the new verifier pass, recursion, `bpf_alloc()` | experimental, not upstream yet |
+| the new verifier pass, recursion, 24 arguments, 32 call frames, programs that are unwound and marked, `bpf_alloc()` | experimental, not upstream yet |
 | LLVM: r12, the arena passes, the function table, 7 fixes | patches, not upstream yet |
 | everything else | here |
 
-## The 41 commits behind this file
+## The commits behind this file
 
 | commits | |
 |---|---|
@@ -367,3 +397,4 @@ The list with details: [README.md](README.md#known-not-to-work).
 | 35-37 | 38 + 38 + 16 crates |
 | 38-39 | negative controls, pointers of the kernel that go through memory |
 | 40-41 | `run-tests.sh`, `README.md` |
+| later | programs return what their body returns, tunables are exported, panics print to stderr, aborts unwind, no `bpf_throw()`, no `nounwind`, a scheduler ends when one of its programs is unwound |

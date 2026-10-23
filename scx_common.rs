@@ -993,6 +993,12 @@ impl<T> SpinLock<T> {
         SpinLock { locked: AtomicU32::new(0), data: UnsafeCell::new(v) }
     }
 
+    /// Not inlined. When the lock does not become free the kernel ends the loop
+    /// after a while. It unwinds from a function that holds nothing of its
+    /// own, and the landing pads of the callers run. In a function that has
+    /// turned interrupts off it could only leave the loop, and the caller would
+    /// go on as if it had the lock.
+    #[inline(never)]
     pub fn lock(&self) -> SpinGuard<'_, T> {
         while self.locked.compare_exchange(0, 1, Acquire, Relaxed).is_err() {
             while self.locked.load(Relaxed) != 0 {

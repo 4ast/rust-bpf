@@ -268,7 +268,7 @@ fn dispatch_all_cpus(do_idle_smt: bool, from: Caller) -> bool {
         })
 }
 
-extern "C" fn sched_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn sched_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
     // Dispatch tasks on the available CPUs.
     if !dispatch_all_cpus(true, Caller::Timer) {
         dispatch_all_cpus(false, Caller::Timer);
@@ -298,7 +298,7 @@ extern "C" fn sched_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer
         let _ = timer.start(tick_interval_ns(), 0);
     }
     0
-}
+});
 
 /// Initialize the BPF timer on a target CPU.
 fn init_timer(cpu: i32) -> Result {

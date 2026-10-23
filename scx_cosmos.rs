@@ -95,6 +95,7 @@ extern "C" {
     fn bpf_stream_vprintk(stream_id: i32, fmt: *const u8, args: *const u64,
                            len: u32) -> i32;
     fn bpf_stream_print_stack(stream_id: i32) -> i32;
+    fn scx_bpf_error_bstr(fmt: *mut u8, data: *const u64, data_sz: u32);
 }
 
 // ── Allocator ────────────────────────────────────────────────────────
@@ -731,6 +732,22 @@ fn keep_running(p: &TaskRef, cpu: i32) -> bool {
 #[allow(dead_code)]
 struct ScxExitInfo { /* opaque */ }
 
+/// An unwind that gets to the top of a program is a panic that nobody caught, or
+/// the kernel ended a loop or a recursion that went on for too long. Either way
+/// something is half done. scx_bpf_error() makes the kernel disable the
+/// scheduler and hand the tasks back to the fair class. The program returns 0.
+/// Why it happened is in its stderr.
+struct Unwound;
+
+impl Drop for Unwound {
+    fn drop(&mut self) {
+        // The kfunc takes a `char *`, so the format has to be writable.
+        static FMT: BpfCell<[u8; 22]> = BpfCell(UnsafeCell::new(*b"a program was unwound\0"));
+        let args = [0u64];
+        unsafe { scx_bpf_error_bstr(FMT.0.get() as *mut u8, args.as_ptr(), 8) };
+    }
+}
+
 /// What an op returns to the kernel. One without a value returns 0.
 trait OpRet { fn ret(self) -> i32; }
 impl OpRet for () { #[inline(always)] fn ret(self) -> i32 { 0 } }
@@ -740,15 +757,20 @@ macro_rules! bpf_prog {
     ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         #[link_section = $section]
         #[no_mangle]
-        extern "C" fn $name(_ctx: *const u64) -> i32 {
-            #[inline(always)]
+        extern "C-unwind" fn $name(_ctx: *const u64) -> i32 {
+            // Not inlined: when the kernel ends a loop it leaves the function
+            // that the loop is in. The landing pads of the callers run.
+            #[inline(never)]
             fn op($($arg: $ty),*) $(-> $ret)? $body
             let mut _i = 0usize;
             $(
                 #[allow(unused_assignments)]
                 let $arg = { let v = unsafe { *_ctx.add(_i) } as $ty; _i += 1; v };
             )*
-            OpRet::ret(op($($arg),*))
+            let unwound = Unwound;
+            let ret = OpRet::ret(op($($arg),*));
+            core::mem::forget(unwound);
+            ret
         }
     };
 }
@@ -1137,7 +1159,7 @@ fn oom(layout: Layout) -> ! {
 
 // ── struct_ops map definition ────────────────────────────────────────
 
-type OpFn = extern "C" fn(*const u64) -> i32;
+type OpFn = extern "C-unwind" fn(*const u64) -> i32;
 
 #[repr(C)]
 struct sched_ext_ops {

@@ -1280,7 +1280,7 @@ static P2DQ_TIMERS: [P2dqTimer; MAX_TIMERS] = [
 
 bpf_timer_map!(p2dq_timer_data, timers, MAX_TIMERS);
 
-extern "C" fn timer_cb(_map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn timer_cb(_map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i32 {
     let Some(cb_timer) = P2DQ_TIMERS.get(unsafe { *key } as usize) else { return 0 };
 
     let resched = (cb_timer.run)();
@@ -1291,7 +1291,7 @@ extern "C" fn timer_cb(_map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i
         }
     }
     0
-}
+});
 
 fn start_timers() -> Result {
     P2DQ_TIMERS.iter().zip(0u32..).try_for_each(|(new_timer, timer_id)| {

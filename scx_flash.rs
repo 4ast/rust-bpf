@@ -661,7 +661,7 @@ fn rearm(timer: *mut bpf_timer, duration: u64) -> Result {
 
 /// Tickless timer: preempt the tasks that have used up their time slice, on
 /// the CPUs where other tasks are waiting.
-extern "C" fn tickless_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn tickless_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
     all_cpus()
         // Ignore CPU if idle task is running.
         .filter_map(|cpu| Some((cpu, cpu_curr(cpu).filter(|p| !p.is_idle_task())?)))
@@ -679,10 +679,10 @@ extern "C" fn tickless_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_ti
         scx_error!("Failed to re-arm tickless timer");
     }
     0
-}
+});
 
 /// Throttle timer used to inject idle time across all the CPUs.
-extern "C" fn throttle_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn throttle_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
     let throttled = is_throttled();
 
     // Stop the CPUs sending a preemption IPI (SCX_KICK_PREEMPT) if we need to
@@ -706,7 +706,7 @@ extern "C" fn throttle_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_ti
         scx_error!("Failed to re-arm duty cycle timer");
     }
     0
-}
+});
 
 bpf_prog!("struct_ops.s/flash_init",
 fn flash_init() -> Result {

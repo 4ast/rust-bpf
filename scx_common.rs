@@ -270,7 +270,7 @@ pub const fn __fmt_array<const N: usize>(s: &str) -> [u8; N] {
 /// `static char ___fmt[]` of the C macro.
 #[macro_export]
 macro_rules! scx_error {
-    ($fmt:literal $(, $arg:expr)* $(,)?) => {{
+    ($fmt:expr $(, $arg:expr)* $(,)?) => {{
         static FMT: $crate::scx_common::BpfCell<[u8; $fmt.len() + 1]> =
             $crate::scx_common::BpfCell::new($crate::scx_common::__fmt_array($fmt));
         let args = [$($arg as u64,)* 0u64];
@@ -749,7 +749,7 @@ impl Drop for DsqIter<'_> {
 // outlives the scheduler: ops.exit() has to cancel the timers, and whoever
 // unregisters the scheduler removes the pin.
 
-pub type TimerFn = extern "C" fn(map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i32;
+pub type TimerFn = extern "C-unwind" fn(map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i32;
 
 /// The kernel looks for a member of type struct bpf_timer in the value.
 #[repr(C)]
@@ -880,23 +880,45 @@ macro_rules! bpf_ringbuf_map {
     };
 }
 
-/// std::panic::catch_unwind() for a plain function. Tells whether it came back
-/// without a panic.
+/// Evaluates to @body. If that unwinds, the scheduler is over.
 ///
-/// A panic must not leave an `extern "C"` function like the callback of a timer:
-/// rustc makes that an abort.
+/// For the functions that the kernel calls. An unwind that gets that far is
+/// a panic that nobody caught, or the kernel ended a loop or a recursion that
+/// went on for too long. Either way something is half done. scx_bpf_error()
+/// makes the kernel disable the scheduler and hand the tasks back to the fair
+/// class. The function returns 0. Why it happened is in stderr of the program.
 ///
-/// A macro, so that only the schedulers that use it need
-/// `#![feature(core_intrinsics)]`.
+/// @body must not return from the function: that would look the same. And it
+/// has to be a call of a function that is not inlined: when the kernel ends
+/// a loop it leaves the function that the loop is in, and it is the landing pads
+/// of the callers that run.
 #[macro_export]
-macro_rules! catch_panic {
-    ($f:expr) => {{
-        fn do_call(f: *mut u8) { (unsafe { core::mem::transmute::<*mut u8, fn()>(f) })() }
-        fn do_catch(_f: *mut u8, _payload: *mut u8) {}
+macro_rules! abort_on_unwind {
+    ($name:expr, $body:expr) => {{
+        struct Unwound;
+        impl Drop for Unwound {
+            #[inline(always)]
+            fn drop(&mut self) { $crate::scx_error!(concat!($name, " was unwound")); }
+        }
 
-        let f: fn() = $f;
-        unsafe { core::intrinsics::catch_unwind(do_call, f as *mut u8, do_catch) == 0 }
+        let unwound = Unwound;
+        let ret = $body;
+        core::mem::forget(unwound);
+        ret
     }};
+}
+
+/// A function that the kernel calls and that is not a program, e.g. when a timer
+/// expires.
+#[macro_export]
+macro_rules! bpf_callback {
+    (fn $name:ident($($arg:ident : $ty:ty),* $(,)?) -> i32 $body:block) => {
+        extern "C-unwind" fn $name($($arg: $ty),*) -> i32 {
+            #[inline(never)]
+            fn callback($($arg: $ty),*) -> i32 $body
+            $crate::abort_on_unwind!(stringify!($name), callback($($arg),*))
+        }
+    };
 }
 
 #[derive(Clone, Copy)]
@@ -1241,8 +1263,8 @@ macro_rules! bpf_prog {
     ($section:expr, fn $name:ident($($arg:ident : $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
         #[link_section = $section]
         #[no_mangle]
-        extern "C" fn $name(_ctx: *const u64) -> i32 {
-            #[inline(always)]
+        extern "C-unwind" fn $name(_ctx: *const u64) -> i32 {
+            #[inline(never)]
             fn op($($arg: $ty),*) $(-> $ret)? $body
             let mut _i = 0usize;
             $(
@@ -1253,12 +1275,12 @@ macro_rules! bpf_prog {
                     <$ty as $crate::scx_common::FromCtx>::from_ctx(v)
                 };
             )*
-            $crate::scx_common::OpRet::ret(op($($arg),*))
+            $crate::abort_on_unwind!(stringify!($name), $crate::scx_common::OpRet::ret(op($($arg),*)))
         }
     };
 }
 
-pub type OpFn = extern "C" fn(*const u64) -> i32;
+pub type OpFn = extern "C-unwind" fn(*const u64) -> i32;
 
 pub const fn pad_name<const N: usize>(s: &[u8; N]) -> [u8; 128] {
     let mut buf = [0u8; 128];

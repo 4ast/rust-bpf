@@ -747,7 +747,7 @@ fn init_cpuperf_target() {
 }
 
 /// Throttle timer used to inject idle time across all the CPUs.
-extern "C" fn throttle_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn throttle_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
     let throttled = CPUS_THROTTLED.load(Relaxed);
 
     // Stop the CPUs sending a preemption IPI (SCX_KICK_PREEMPT) if we need to
@@ -771,7 +771,7 @@ extern "C" fn throttle_timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_ti
         scx_error!("Failed to re-arm duty cycle timer");
     }
     0
-}
+});
 
 fn create_dsq(dsq: Dsq, node: i32) -> Result {
     dsq.create(node).inspect_err(|e| scx_error!("failed to create DSQ %llu: %d", dsq.0, -e.0))

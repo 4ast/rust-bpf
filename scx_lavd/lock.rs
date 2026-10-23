@@ -60,14 +60,18 @@ macro_rules! futex_fexit {
     ($($name:ident: $func:literal, $ok:expr => $action:ident;)*) => { $(
         #[link_section = concat!("?fexit/", $func)]
         #[no_mangle]
-        extern "C" fn $name(ctx: *const u64) -> i32 {
-            let mut retval = 0u64;
-            unsafe { bpf_get_func_ret(ctx, &mut retval) };
-            let ok: fn(i32) -> bool = $ok;
-            if ok(retval as i32) {
-                $action();
+        extern "C-unwind" fn $name(ctx: *const u64) -> i32 {
+            #[inline(never)]
+            fn fexit(ctx: *const u64) -> i32 {
+                let mut retval = 0u64;
+                unsafe { bpf_get_func_ret(ctx, &mut retval) };
+                let ok: fn(i32) -> bool = $ok;
+                if ok(retval as i32) {
+                    $action();
+                }
+                0
             }
-            0
+            abort_on_unwind!(stringify!($name), fexit(ctx))
         }
     )* };
 }

@@ -42,7 +42,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(core_intrinsics)]
 #![allow(dead_code, internal_features)]
 
 extern crate alloc;
@@ -103,13 +102,16 @@ tunables! { "qmap",
     /// Makes the scheduler fail after that many enqueues.
     TEST_ERROR_CNT: AtomicU32 = 0;
     /// 0: off, 1: dispatch to a cid we don't hold, 2: fail init_task for
-    /// "qmfail*" comms, 4: panic in the monitor timer (not in C)
+    /// "qmfail*" comms, 4: panic in the monitor timer, 5: panic in
+    /// ops.enqueue(), 6: a loop in ops.enqueue() that does not end (not in C)
     INJECT_MODE: AtomicU32 = 0;
 }
 
 const QMAP_INJ_WRONG_CID: u32 = 1;
 const QMAP_INJ_INIT_FAIL: u32 = 2;
 const QMAP_INJ_TIMER_PANIC: u32 = 4;
+const QMAP_INJ_ENQ_PANIC: u32 = 5;
+const QMAP_INJ_ENQ_LOOP: u32 = 6;
 
 // ── kfuncs of the cid form and of sub-schedulers ─────────────────────
 
@@ -433,6 +435,15 @@ fn qmap_enqueue(p: Task, enq_flags: u64) {
     static KERNEL_CNT: AtomicU32 = AtomicU32::new(0);
     static INJ_CNT: AtomicU32 = AtomicU32::new(0);
     static IMMED_STRESS_CNT: AtomicU32 = AtomicU32::new(0);
+
+    match INJECT_MODE.load(Relaxed) {
+        QMAP_INJ_ENQ_PANIC => panic!("injected"),
+        // The kernel ends it.
+        QMAP_INJ_ENQ_LOOP => while INJECT_MODE.load(Relaxed) == QMAP_INJ_ENQ_LOOP {
+            core::hint::spin_loop();
+        },
+        _ => {}
+    }
 
     let idx = weight_to_idx(p.weight());
     let slice_ns = SLICE_NS.load(Relaxed);
@@ -950,18 +961,16 @@ static QMAP_TIMERS: [QmapTimer; NR_TIMERS] = [
 
 bpf_timer_map!(qmap_timer_data, timers, NR_TIMERS);
 
-extern "C" fn timer_cb(_map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn timer_cb(_map: *mut u8, key: *mut u32, timer: *mut bpf_timer) -> i32 {
     let Some(t) = QMAP_TIMERS.get(unsafe { *key } as usize) else { return 0 };
 
-    if !catch_panic!(t.run) {
-        scx_error!("panic in a timer function");
-    }
+    (t.run)();
 
     if Timer::from_ptr(timer).is_none_or(|timer| timer.start(t.interval_ns(), 0).is_err()) {
         scx_error!("failed to re-arm timer");
     }
     0
-}
+});
 
 // ── Sub-schedulers: who gets which cids ──────────────────────────────
 

@@ -282,7 +282,7 @@ fn central_stopping(p: Task, _runnable: bool) {
     }
 });
 
-extern "C" fn timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
+bpf_callback!(fn timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
     let now = scx_now();
     let mut nr_to_kick = NR_QUEUED.load(Relaxed);
     let pinned = TIMER_PINNED.load(Relaxed);
@@ -327,7 +327,7 @@ extern "C" fn timerfn(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i
     }
     Stat::Timers.inc();
     0
-}
+});
 
 bpf_prog!("struct_ops.s/central_init",
 fn central_init() -> Result {

@@ -324,16 +324,14 @@ pub fn update_sys_stat() {
 
 bpf_timer_map!(lavd_update_timer, update_timer, 1);
 
-extern "C" fn update_timer_cb(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
-    if !catch_panic!(update_sys_stat) {
-        scx_error!("panic in update_sys_stat()");
-    }
+bpf_callback!(fn update_timer_cb(_map: *mut u8, _key: *mut u32, timer: *mut bpf_timer) -> i32 {
+    update_sys_stat();
 
     if Timer::from_ptr(timer).is_none_or(|timer| timer.start(LAVD_SYS_STAT_INTERVAL_NS, 0).is_err()) {
         scx_error!("Failed to arm update timer");
     }
     0
-}
+});
 
 pub fn init_sys_stat(now: u64) -> Result {
     SYS_STAT.last_update_clk.set(now);

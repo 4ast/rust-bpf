@@ -21,10 +21,7 @@
 #   OUT/corpus.tsv          a line per test, columns below
 #
 # env: OUT, ONLY=sched|corpus, SCHEDS="scx_a scx_b", TESTS="c_int k_map" (files of
-#      corpus/tests-bpf), TMO (seconds per test, 60),
-#      BUDGET_COOKIE (77): what a program returns that the kernel ends because a
-#      loop or a recursion went on for too long. The default of the kernel is 0,
-#      which is what a test that passes returns.
+#      corpus/tests-bpf), TMO (seconds per test, 60)
 # VM_BIN, VM_RUN, VERISTAT and BPFTOOL are those of toolchain.mk and config.mk.
 TOP=$(cd "$(dirname "$0")" && pwd)
 KIT=${1:?usage: run-tests.sh KIT PORT}; PORT=${2:?usage: run-tests.sh KIT PORT}
@@ -129,14 +126,15 @@ fi
 #   host     what the same test returns on x86-64: the control for the test
 #   compile  ok | fail
 #   load     ok | libbpf | verifier | open
-#   result   ok | check:LINE | panic:LINE | leak:N | run:ERROR. "=" in front: that
-#            is what the test is there to return (corpus/EXPECT)
+#   result   ok | check:LINE | panic:LINE | leak:N | unwound | run:ERROR. "=" in
+#            front: that is what the test is there to return (corpus/EXPECT).
+#            unwound: the kernel ended a loop or a recursion that went on for
+#            too long. Such a program may well return 0.
 
 names() { sed -n 's/^test!(\(leaks \)\{0,1\}\([a-z_0-9]*\),.*/\2/p' "$C/tests-bpf/$1.rs"; }
 
 if [ "$ONLY" != sched ]; then
 	[ -n "$TESTS" ] || TESTS=$(ls "$C/tests-bpf" | sed 's/\.rs$//')
-	ssh "echo ${BUDGET_COOKIE:-77} > /sys/module/verifier/parameters/budget_cookie" < /dev/null
 	push "$C/bld" run $(for f in $TESTS; do for n in $(names $f); do [ -f "$C/bld/one/$n.o" ] && echo one/$n.o; done; done)
 	: > "$OUT/corpus.tsv"
 	for f in $TESTS; do
@@ -155,7 +153,7 @@ if [ "$ONLY" != sched ]; then
 	done
 	{
 		echo "corpus: $(wc -l < "$OUT/corpus.tsv") tests, as expected: $(awk -F'\t' '$6=="ok"||$6~/^=/' "$OUT/corpus.tsv" | wc -l), host control not as expected: $(awk -F'\t' 'NR==FNR{if ($0 !~ /^#/) {split($0,a," "); e[a[1]]=a[2]}; next} {w=($2 in e)?e[$2]:"ok"; if (index($3,w)!=1) print}' "$C/EXPECT" "$OUT/corpus.tsv" | wc -l), $(awk -F'\t' '{i+=$8} END {print i+0}' "$OUT/corpus.tsv") insns walked"
-		awk -F'\t' '$6!="ok" && $6!~/^=/{k=($4!="ok")?"compile: "$10:(($5=="ok")?"run: "$6:$5": "$10); gsub(/[0-9]+ iterations/,"N iterations",k); gsub(/insn [0-9]+/,"insn N",k); gsub(/R[0-9] !read/,"Rx !read",k); gsub(/off -[0-9]+\+0/,"off N",k); c[k]++; l[k]=l[k]" "$2} END{for(k in c) print "  "c[k]"\t"k"\t"l[k]}' "$OUT/corpus.tsv" | sort -k1,1rn | cut -c1-230
+		awk -F'\t' '$6!="ok" && $6!~/^=/{k=($4!="ok")?"compile: "$10:(($5=="ok")?"run: "$6" "$10:$5": "$10); gsub(/[0-9]+ iterations/,"N iterations",k); gsub(/insn [0-9]+/,"insn N",k); gsub(/R[0-9] !read/,"Rx !read",k); gsub(/off -[0-9]+\+0/,"off N",k); c[k]++; l[k]=l[k]" "$2} END{for(k in c) print "  "c[k]"\t"k"\t"l[k]}' "$OUT/corpus.tsv" | sort -k1,1rn | cut -c1-230
 		echo "  most expensive to verify: $(sort -t$'\t' -k8,8rn "$OUT/corpus.tsv" | head -3 | awk -F'\t' '{printf "%s %d insns; ", $2, $8}')"
 	} | tee -a "$SUM"
 fi

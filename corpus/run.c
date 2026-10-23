@@ -8,6 +8,10 @@
  *   PROG <tab> load result <tab> test result <tab> insns in the program <tab>
  *   insns the verifier processed <tab> run time, usec <tab> first message
  *
+ * The test result of a program that the kernel cut short, because a loop or
+ * a recursion went on for too long, is "unwound" whatever it returned. The
+ * message is the first line in stderr of the program.
+ *
  * -v prints the whole verifier log of a rejected program to stderr.
  */
 #include <stdio.h>
@@ -87,12 +91,27 @@ static void result(char *buf, size_t sz, int err, int ret)
 		snprintf(buf, sz, "check:%d", ret);
 }
 
+static int unwound(int fd, char *msg, size_t sz)
+{
+	struct bpf_prog_info info = {};
+	__u32 len = sizeof(info);
+	int n;
+
+	msg[0] = 0;
+	if (bpf_prog_get_info_by_fd(fd, &info, &len) || !info.unwound)
+		return 0;
+	n = bpf_prog_stream_read(fd, BPF_STREAM_STDERR, msg, sz - 1, NULL);
+	msg[n > 0 ? n : 0] = 0;
+	msg[strcspn(msg, "\n")] = 0;
+	return 1;
+}
+
 static void one(const char *file, const char *name)
 {
 	LIBBPF_OPTS(bpf_test_run_opts, o);
 	struct bpf_program *p, *prog = NULL;
 	struct bpf_object *obj;
-	char res[64];
+	char res[64], msg[256];
 	long nr;
 	int err;
 
@@ -121,7 +140,9 @@ static void one(const char *file, const char *name)
 	}
 	err = bpf_prog_test_run_opts(bpf_program__fd(prog), &o);
 	result(res, sizeof(res), err, o.retval);
-	printf("%s\tok\t%s\t%zu\t%ld\t%u\t\n", name, res, bpf_program__insn_cnt(prog), nr, o.duration / 1000);
+	if (unwound(bpf_program__fd(prog), msg, sizeof(msg)))
+		snprintf(res, sizeof(res), "unwound");
+	printf("%s\tok\t%s\t%zu\t%ld\t%u\t%s\n", name, res, bpf_program__insn_cnt(prog), nr, o.duration / 1000, msg);
 out:
 	fflush(stdout);
 	bpf_object__close(obj);

@@ -53,7 +53,7 @@ $(SYSLIB)/.stamp: $(DEPDIR)/libcore.rlib $(DEPDIR)/liballoc.rlib $(DEPDIR)/libco
 # results of earlier builds too.
 $(BLDDIR)/artifacts.txt: $(SYSLIB)/.stamp vendor/.stamp Cargo.toml src/lib.rs $(wildcard tests-bpf/*.rs)
 	PATH="$(RUST_TOOLCHAIN)/bin:$$PATH" RUSTC_BOOTSTRAP=1 CARGO_TARGET_DIR=$(BLDDIR)/target \
-	RUSTFLAGS="--sysroot=$(SYSROOT) -Z unstable-options" \
+	RUSTFLAGS="--sysroot=$(SYSROOT) -C llvm-args=$(NO_NOUNWIND) -Z unstable-options" \
 	$(CARGO) build -Zjson-target-spec $(CARGO_SRC) --release --keep-going --examples --target $(TARGET) -j8 \
 		--message-format=json-render-diagnostics > $(BLDDIR)/cargo.json; \
 	python3 -c 'import json,sys; [print(f) for l in open(sys.argv[1]) for m in [json.loads(l)] if m.get("reason") == "compiler-artifact" for f in m["filenames"] if f.endswith(".rlib") and "/$(TARGET_NAME)/" in f]' \
@@ -104,7 +104,7 @@ $(BLDDIR)/%-linked.bc: $(BLDDIR)/world.bc
 # it. So the error is shown and make goes on.
 NAMES = $$(sed -n 's/^test!(\(leaks \)\{0,1\}\([a-z_0-9]*\),.*/\2/p' tests-bpf/$(1).rs)
 BC2OBJ := LLVM_PREFIX=$(LLVM_PREFIX) BLDDIR=$(BLDDIR) TOP=$(TOP) LLC_ATTR='$(LLC_ATTR)' \
-	ARENA_PASSES='$(ARENA_PASSES)' KEEP_TMP=$(KEEP_TMP) \
+	ARENA_PASSES='$(ARENA_PASSES)' NO_NOUNWIND='$(NO_NOUNWIND)' KEEP_TMP=$(KEEP_TMP) \
 	KSYM_BTF_FILES='$(KSYM_BTF_FILES)' BPFTOOL='$(BPFTOOL)' ./bc2obj.sh
 
 # The prototypes of the kfuncs are copied from the BTF of the kernel. The stamp

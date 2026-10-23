@@ -29,6 +29,13 @@ RUST_SRC ?= $(RUST_TOOLCHAIN)/lib/rustlib/src/rust/library
 CARGO ?= $(RUST_TOOLCHAIN)/bin/cargo
 RUSTC_THREADS ?= 64
 
+# Every function may unwind, also one that has nothing in it that panics: the
+# kernel ends a loop or a recursion that goes on for too long with an unwind.
+# LLVM must not conclude otherwise. The callers would lose their landing pads,
+# and with them the Drop impls that release what they hold. For the LLVM in
+# rustc and for the opt that optimizes.
+NO_NOUNWIND ?= -disable-nounwind-inference
+
 # All memory of a program is in arena. opt picks the locals and the global data
 # that go there and makes the table for indirect calls, llc does the rest.
 ARENA_PASSES ?= bpf-func-table,bpf-arena-data,function(bpf-arena-stack)

@@ -32,7 +32,7 @@ DEPDIR := $(CURDIR)/bld_deps
 CORE_CFG ?= --cfg 'no_fp_fmt_parse'
 
 RUSTFLAGS_ENV := RUSTC_BOOTSTRAP=1
-RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -Z unstable-options -Z threads=$(RUSTC_THREADS)
+RUSTC_COMMON := --target $(TARGET) -C opt-level=3 -C panic=unwind -C debuginfo=2 -C llvm-args=$(NO_NOUNWIND) -Z unstable-options -Z threads=$(RUSTC_THREADS)
 
 # Programs demonstrating btf_type_tag / btf_decl_tag. They use the same
 # pipeline as the scx_* programs: btf_tags.py turns the `.btf_tags` manifest
@@ -191,7 +191,7 @@ KEEP_SYMS := simple_* cosmos_* enable_sibling_cpu enable_primary_cpu \
              _LICENSE
 INTERNALIZE := $(foreach s,$(KEEP_SYMS),--internalize-public-api-list='$(s)')
 $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
-	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold \
+	$(OPT) $(INTERNALIZE) --force-remove-attribute=cold $(NO_NOUNWIND) \
 		-passes='forceattrs,internalize,globaldce,default<O2>' $< -o $@
 
 # --- Add .ksyms, unreachable→ret for BPF ---
@@ -285,7 +285,7 @@ $$(BLDDIR)/$(1).bc: $(1).rs $$(DEPDIR)/liballoc.rlib
 		--emit=llvm-bc -o $$@ $$<
 
 $$(BLDDIR)/$(1)-opt.bc: $$(BLDDIR)/$(1)-linked.bc
-	$$(OPT) $$(EH_INTERNALIZE) --force-remove-attribute=cold \
+	$$(OPT) $$(EH_INTERNALIZE) --force-remove-attribute=cold $$(NO_NOUNWIND) \
 		-passes='forceattrs,internalize,globaldce,default<O2>' $$< -o $$@
 
 $$(BLDDIR)/$(1)-ksyms.bc: $$(BLDDIR)/$(1)-opt.bc

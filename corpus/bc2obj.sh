@@ -8,7 +8,8 @@
 # passes and compiler_builtins.
 #
 # env: LLVM_PREFIX, BLDDIR (builtins.bc, shim.bc), TOP (add_ksyms.py),
-#      LLC_ATTR, ARENA_PASSES, OPT_ARGS (for the opt that runs them), O2_ARGS (for the opt that optimizes),
+#      LLC_ATTR, ARENA_PASSES, OPT_ARGS (for the opt that runs them), O2_ARGS and
+#      NO_NOUNWIND (for the opt that optimizes),
 #      KEEP_TMP=1 to keep the intermediate files,
 #      NO_FIX_PROTOS=1 to leave the prototypes in BTF as rustc describes them
 set -e
@@ -26,7 +27,7 @@ keep=--internalize-public-api-list=_LICENSE
 for p in "$@"; do keep="$keep --internalize-public-api-list=$p"; done
 
 # keep the programs and the license, optimize
-$B/opt $keep --force-remove-attribute=cold $O2_ARGS \
+$B/opt $keep --force-remove-attribute=cold $O2_ARGS $NO_NOUNWIND \
 	-passes='forceattrs,internalize,globaldce,default<O2>' $in -o $t-opt.bc
 
 # what llc is going to call

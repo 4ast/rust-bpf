@@ -59,7 +59,7 @@
 
 #![no_std]
 #![no_main]
-#![feature(panic_can_unwind, core_intrinsics)]
+#![feature(core_intrinsics)]
 #![allow(dead_code, internal_features)]
 
 extern crate alloc;

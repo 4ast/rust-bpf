@@ -12,7 +12,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(panic_can_unwind)]
 
 extern crate alloc;
 
@@ -93,7 +92,6 @@ extern "C" {
     fn scx_bpf_get_idle_smtmask() -> *const u64;
     fn scx_bpf_put_cpumask(mask: *const u64);
 
-    fn bpf_throw(cookie: u64) -> !;
     fn bpf_stream_vprintk(stream_id: i32, fmt: *const u8, args: *const u64,
                            len: u32) -> i32;
     fn bpf_stream_print_stack(stream_id: i32) -> i32;
@@ -1117,35 +1115,24 @@ impl core::fmt::Write for BpfStream {
     }
 }
 
-/// A panic unwinds, so that every frame on the way out runs its Drop impls. One
-/// that cannot unwind, e.g. because it reached an extern "C" boundary, aborts
-/// the program with bpf_throw() instead.
-///
-/// core raises the second kind from panic_nounwind_fmt(), which must not unwind
-/// and so has a landing pad that panics the same way again. The verifier takes
-/// that for recursion, even though it never runs, so the pad has to go: the
-/// handler is inlined to make can_unwind() a constant there, and what is left
-/// stays away from core::fmt, whose indirect calls may unwind as far as LLVM
-/// knows. Most such panics have a plain string for a message. The message of one
-/// that needs formatting is not printed.
+/// A panic unwinds, so that every frame on the way out runs its Drop impls. So
+/// does one that must not, e.g. because it got to the end of an extern "C"
+/// function, and so does an abort: see add_ksyms.py. There is no other way to
+/// end a program that holds a lock, a reference or interrupt flags.
 #[panic_handler]
-#[inline(always)]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
-    let mut stream = BpfStream(BPF_STDERR);
-    if info.can_unwind() {
-        let _ = writeln!(stream, "{}", info);
-        unsafe { bpf_stream_print_stack(BPF_STDERR) };
-        unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };
-    } else if let Some(msg) = info.message().as_str() {
-        let _ = stream.write_str(msg);
+    let _ = writeln!(BpfStream(BPF_STDERR), "{}", info);
+    unsafe {
+        bpf_stream_print_stack(BPF_STDERR);
+        _Unwind_RaiseException(core::ptr::null_mut());
+        core::hint::unreachable_unchecked()
     }
-    unsafe { bpf_throw(1) }
 }
 
 #[alloc_error_handler]
-fn oom(_: Layout) -> ! {
-    unsafe { bpf_throw(12) }
+fn oom(layout: Layout) -> ! {
+    panic!("memory allocation of {} bytes failed", layout.size())
 }
 
 // ── struct_ops map definition ────────────────────────────────────────

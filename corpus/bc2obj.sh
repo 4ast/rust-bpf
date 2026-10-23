@@ -21,7 +21,6 @@ LLC_ATTR=${LLC_ATTR-+arena-stack,+arena-data}
 ARENA_PASSES=${ARENA_PASSES-bpf-func-table,bpf-arena-data,function(bpf-arena-stack)}
 # A copy of a small function per vtable that it is called with: the calls through the vtable are direct then.
 O2_ARGS=${O2_ARGS--funcspec-on-address -funcspec-min-function-size=1}
-export TRAP_TO_BPF_THROW=1
 
 keep=--internalize-public-api-list=_LICENSE
 for p in "$@"; do keep="$keep --internalize-public-api-list=$p"; done

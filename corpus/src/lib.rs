@@ -8,7 +8,6 @@
 //! panics are those of std, the rest is the same.
 #![no_std]
 #![cfg_attr(target_arch = "bpf", feature(lang_items))]
-#![cfg_attr(target_arch = "bpf", feature(panic_can_unwind))]
 #![cfg_attr(target_arch = "bpf", feature(alloc_error_handler))]
 #![cfg_attr(target_arch = "bpf", feature(core_intrinsics))]
 #![allow(internal_features)]
@@ -122,9 +121,6 @@ mod imp {
     unsafe extern "C-unwind" {
         fn _Unwind_RaiseException(exception: *mut u8) -> i32;
     }
-    unsafe extern "C" {
-        fn bpf_throw(cookie: u64) -> !;
-    }
 
     #[panic_handler]
     fn panic(info: &PanicInfo) -> ! {
@@ -135,10 +131,11 @@ mod imp {
                 None => 0,
             };
         }
-        if info.can_unwind() {
-            unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };
+        // Also when it must not unwind: see ../add_ksyms.py.
+        unsafe {
+            _Unwind_RaiseException(core::ptr::null_mut());
+            core::hint::unreachable_unchecked()
         }
-        unsafe { bpf_throw(1) }
     }
 
     #[alloc_error_handler]

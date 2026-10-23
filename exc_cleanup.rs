@@ -60,7 +60,6 @@
 #![no_std]
 #![no_main]
 #![feature(lang_items)]
-#![feature(panic_can_unwind)]
 #![allow(internal_features)]
 
 use core::hint::black_box;
@@ -78,8 +77,6 @@ unsafe extern "C-unwind" {
 }
 
 unsafe extern "C" {
-    /// Aborts the program: no landing pad runs.
-    fn bpf_throw(cookie: u64) -> !;
     fn bpf_rcu_read_lock();
     fn bpf_rcu_read_unlock();
     fn bpf_preempt_disable();
@@ -219,16 +216,13 @@ pub extern "C-unwind" fn entry(_ctx: *mut u8) -> i32 {
 
 // -- unwinding runtime bits --
 
-/// A Rust panic turns into a BPF unwind here.  One that cannot unwind aborts the
-/// program instead.  Nothing in this program panics like that, so bpf_throw()
-/// does not reach the object; scx_simple.rs has more on this.
+/// A Rust panic turns into a BPF unwind here.  scx_simple.rs has more on this.
 #[panic_handler]
-#[inline(always)]
-fn panic(info: &PanicInfo) -> ! {
-    if info.can_unwind() {
-        unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };
+fn panic(_info: &PanicInfo) -> ! {
+    unsafe {
+        _Unwind_RaiseException(core::ptr::null_mut());
+        core::hint::unreachable_unchecked()
     }
-    unsafe { bpf_throw(1) }
 }
 
 /// Referenced by every function with a landing pad; never actually called on

@@ -57,15 +57,6 @@ endif
 endif
 EH_PROGS := exc_cleanup
 
-# Some of the pads abort instead of cleaning up, e.g. the PanicGuard in
-# liballoc's btree::mem::replace(). That is llvm.trap, which llc emits as
-# __bpf_trap, and the verifier rejects a program that can reach it. It is one
-# more panic that cannot unwind, so it ends like the others
-# (TRAP_TO_BPF_THROW=1, the cookie the panic handlers use). Except where the
-# function may unwind: there it unwinds (TRAP_TO_UNWIND=1), because bpf_throw is
-# refused while a caller holds interrupt flags, an RCU section or a reference.
-KSYMS_ENV := TRAP_TO_UNWIND=1 TRAP_TO_BPF_THROW=1
-
 all: progs corpus
 progs: $(addprefix $(BLDDIR)/,$(addsuffix .o,$(PROGS) $(EH_PROGS))) $(BLDDIR)/scxload
 
@@ -214,11 +205,11 @@ $(BLDDIR)/%-opt.bc: $(BLDDIR)/%-reloc.bc
 # annotations only have to exist at this point.
 $(BLDDIR)/%-ksyms.bc: $(BLDDIR)/%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py
 	$(LLVM_DIS) $< -o $@.ll
-	$(KSYMS_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@.tmp.bc
 	$(OPT) -passes=simplifycfg $@.tmp.bc -o $@.tmp2.bc
 	$(LLVM_DIS) $@.tmp2.bc -o $@.ll
-	$(KSYMS_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	python3 $(CURDIR)/btf_tags.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@
 	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc
@@ -243,11 +234,11 @@ $(BLDDIR)/arena-kfunc-args: $(CURDIR)/arena_kfunc_args.py $(KSYMS_STAMP)
 $(BLDDIR)/scx_%-ksyms.bc: $(BLDDIR)/scx_%-opt.bc $(CURDIR)/add_ksyms.py $(CURDIR)/btf_tags.py $(KSYMS_STAMP) $(BLDDIR)/arena-kfunc-args
 	$(OPT) -mtriple=bpfel -passes='$(ARENA_PASSES)' -bpf-arena-kfunc-args=$$(cat $(BLDDIR)/arena-kfunc-args) $< -o $@.arena.bc
 	$(LLVM_DIS) $@.arena.bc -o $@.ll
-	$(KSYMS_ENV) $(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@.tmp.bc
 	$(OPT) -passes=simplifycfg $@.tmp.bc -o $@.tmp2.bc
 	$(LLVM_DIS) $@.tmp2.bc -o $@.ll
-	$(KSYMS_ENV) $(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
+	$(KSYMS_BTF_ENV) python3 $(CURDIR)/add_ksyms.py $@.ll $@.ll
 	python3 $(CURDIR)/btf_tags.py $@.ll $@.ll
 	$(LLVM_AS) $@.ll -o $@
 	@rm -f $@.ll $@.tmp.bc $@.tmp2.bc $@.arena.bc

@@ -15,7 +15,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(panic_can_unwind)]
 
 extern crate alloc;
 

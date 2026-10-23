@@ -467,72 +467,172 @@ for old, new in libcall_renames.items():
     text = re.sub(r'(!DISubprogram\(name:\s*")' + re.escape(old) + r'"',
                   r'\g<1>' + new + '"', text)
 
-# Optionally lower llvm.trap to the bpf_throw kfunc (BPF exceptions):
-# panic=immediate-abort turns every Rust panic/alloc-failure into llvm.trap,
-# which llc emits as __bpf_trap — and the verifier REJECTS any reachable
-# __bpf_trap. bpf_throw is the sanctioned "abort this program" mechanism:
-# the program cleanly returns the cookie instead. Enabled per-pipeline via
-# TRAP_TO_BPF_THROW=<cookie> (rust-selftests/collections sets it).
+# An abort unwinds.
 #
-# TRAP_TO_UNWIND=1 goes first and takes the traps of the functions that may
-# unwind: there the trap starts an unwind, like a panic. An abort is not supposed
-# to run any Drop, but bpf_throw is refused by the verifier while interrupt
-# flags, an RCU section, a lock or a reference are held, and the callers that
-# hold them release them in their landing pads. What the function with the trap
-# holds itself is not released, so the guard has to be in a caller. A function
-# that is nounwind keeps its trap: its callers have no landing pads.
+# core and alloc abort in a few places: a reference count overflows, the closure
+# of btree::mem::replace() panics, a Drop that runs in a landing pad panics,
+# a panic gets to the end of an extern "C" function. That is llvm.trap, which
+# llc emits as __bpf_trap, and the verifier rejects a program that can reach it.
+# Or it is one of the panics of core that must not unwind.
 #
-# The same goes for the panics of core that must not unwind and end in bpf_throw
-# in the panic handler. The one that matters is panic_in_cleanup(): rustc calls
-# it when a Drop that runs in a landing pad unwinds, and as far as it knows the
-# Drop of an Arc or of a Box<dyn ..> may. Their message is lost.
-NOUNWIND_PANIC = re.compile(
-    r'(tail\s+)?call (?:fastcc )?void @_R\w*4core9panicking\d+panic_(?:in_cleanup|cannot_unwind)\(\)( #\d+)?')
+# A BPF program cannot just stop. What it holds has to be released: interrupt
+# flags, an RCU section, a lock, a reference. Landing pads do that, so an abort
+# starts an unwind like a panic does. The message of such a panic is lost.
+#
+# LLVM knows that a trap does not unwind. A function that does nothing else that
+# may unwind is nounwind, and so are its callers: there is no unwind_goto after
+# the calls, and the kernel does not take unwind_exit then. So the function and
+# the calls of it lose nounwind, and so do the callers that have no landing pad
+# for the call, all the way up. A frame without a pad is left as it is, like an
+# abort would leave it. What it holds itself is not released, and the verifier
+# rejects the program if it is something that the kernel knows about: the guard
+# has to be in a caller that has a pad.
+#
+# One abort is different: a Drop that runs in a landing pad unwinds. The pad has
+# more to do, e.g. to put the reference that the next Drop holds, so it must
+# not be left. It goes on as if the Drop had returned:
+#
+#   invoke void @drop(..) to label %next unwind label %terminate
+#   terminate: landingpad, call panic_in_cleanup()
+#
+# becomes
+#
+#   invoke void @drop(..) to label %next unwind label %goes.on
+#   goes.on: landingpad, br label %next
+#
+# Not when the Drop was inlined and what is called is the panic itself: it does
+# not return, so there is no %next to go on with.
+LABEL = re.compile(r'^([-\w.$]+):')
+IN_CLEANUP = re.compile(r'call (?:fastcc )?void @_R\w*4core9panicking\d+panic_in_cleanup\(\)')
+TO_LABEL = re.compile(r'^(\s+to label %)([-\w.$]+)( unwind label %)([-\w.$]+)(.*)$')
 
 
-def trap_to_unwind(text):
-    nounwind_groups = set(
-        m.group(1) for m in re.finditer(r'^attributes #(\d+) = \{([^}]*)\}', text, re.M)
-        if re.search(r'\bnounwind\b', m.group(2)))
-    out, may_unwind, n = [], False, 0
-    for line in text.split('\n'):
+def cleanup_goes_on(text):
+    out, n = [], 0
+    for func in re.split(r'(?m)^(?=define )', text):
+        if not func.startswith('define ') or not IN_CLEANUP.search(func):
+            out.append(func)
+            continue
+        end = func.index('\n}\n')
+        lines, rest = func[:end].split('\n'), func[end:]
+        block, start, terminate, dead, first = None, {}, set(), set(), False
+        for i, line in enumerate(lines):
+            m = LABEL.match(line)
+            if m:
+                block, first = m.group(1), True
+                start[block] = i
+                continue
+            if IN_CLEANUP.search(line):
+                terminate.add(block)
+            elif first and re.match(r'\s+unreachable', line):
+                dead.add(block)
+            first = first and bool(re.match(r'\s*(#dbg_|$)', line))
+        block, pads, phis = None, [], []
+        for i, line in enumerate(lines):
+            m = LABEL.match(line)
+            if m:
+                block = m.group(1)
+            m = TO_LABEL.match(line)
+            # What a call returns is not there when it unwinds.
+            if (not m or m.group(4) not in terminate or m.group(2) in dead
+                    or not re.match(r'\s+invoke ', lines[i - 1])):
+                continue
+            n += 1
+            pad = f'goes.on.{n}'
+            lines[i] = f'{m.group(1)}{m.group(2)}{m.group(3)}{pad}{m.group(5)}'
+            pads += [f'{pad}:', f'  %{pad}.lp = landingpad {{ ptr, i32 }}', '          cleanup',
+                     f'  br label %{m.group(2)}', '']
+            phis.append((m.group(2), block, pad))
+        for dest, pred, pad in phis:
+            i = start[dest] + 1
+            while re.match(r'\s+%[-\w.$]+ = phi ', lines[i]):
+                val = re.search(rf'\[ ([^\[\]]*), %{re.escape(pred)} \]', lines[i]).group(1)
+                k = lines[i].rindex(']') + 1
+                lines[i] = f'{lines[i][:k]}, [ {val}, %{pad} ]{lines[i][k:]}'
+                i += 1
+        out.append('\n'.join(lines + [''] + pads[:-1]) + rest)
+    return ''.join(out)
+
+
+RAISE = 'call i32 @_Unwind_RaiseException(ptr null)'
+ABORT = re.compile(
+    r'(?:(?:tail|musttail|notail)\s+)?call (?:fastcc )?void @'
+    r'(?:llvm\.trap|_R\w*4core9panicking\d+panic_(?:in_cleanup|cannot_unwind))\(\)(?: #\d+)?')
+CALLEE = re.compile(r'\b(call|invoke)\b[^@\n]*?(?:@([-\w.$]+)|(%[-\w.$]+))\(')
+
+
+def aborts_unwind(text):
+    lines = text.split('\n')
+    groups = {m.group(1): m.group(2) for m in
+              re.finditer(r'^attributes #(\d+) = \{([^}]*)\}', text, re.M)}
+    nounwind = {g for g, body in groups.items() if re.search(r'\bnounwind\b', body)}
+    twins = {}
+
+    def strip(line):
+        """the line with attribute groups that are not nounwind"""
+        def twin(m):
+            g = m.group(1)
+            if g not in nounwind:
+                return m.group(0)
+            if g not in twins:
+                twins[g] = str(max(map(int, groups)) + 1 + len(twins))
+            return ' #' + twins[g]
+        return re.sub(r' #(\d+)\b', twin, line)
+
+    def is_nounwind(line):
+        return any(g in nounwind for g in re.findall(r' #(\d+)\b', line))
+
+    defs, sites, indirect, todo, taken = {}, {}, [], [], set()
+    cur, n = None, 0
+    for i, line in enumerate(lines):
         if line.startswith('define '):
-            groups = re.findall(r'#(\d+)', line.rsplit(')', 1)[-1])
-            may_unwind = (not any(g in nounwind_groups for g in groups)
-                          and not re.search(r'\)[^)]*\bnounwind\b', line))
-        if may_unwind and re.search(r'call void @llvm\.trap\(\)', line):
+            cur = re.search(r'@([-\w.$]+)\(', line).group(1)
+            defs[cur] = i
+        elif line == '}':
+            cur = None
+        if cur is None or line.startswith('define '):
+            if not line.startswith(('define ', 'declare ')):
+                taken.update(re.findall(r'@([-\w.$]+)', line))
+            continue
+        if ABORT.search(line):
             n += 1
-            line = re.sub(r'(tail\s+)?call void @llvm\.trap\(\)( #\d+)?',
-                          f'%__trap.{n} = call i32 @_Unwind_RaiseException(ptr null)', line)
-        elif may_unwind and NOUNWIND_PANIC.search(line):
-            n += 1
-            line = NOUNWIND_PANIC.sub(
-                f'%__trap.{n} = call i32 @_Unwind_RaiseException(ptr null)', line)
-        out.append(line)
-    return '\n'.join(out)
+            lines[i] = line = ABORT.sub(f'%__abort.{n} = {RAISE}', line)
+        m = CALLEE.search(line)
+        if not m:
+            taken.update(re.findall(r'@([-\w.$]+)', line))
+            continue
+        taken.update(re.findall(r'@([-\w.$]+)', line[m.end():]))
+        if m.group(2) == '_Unwind_RaiseException':
+            if m.group(1) == 'call':
+                todo.append(cur)
+        elif m.group(2):
+            sites.setdefault(m.group(2), []).append((i, cur, m.group(1)))
+        else:
+            indirect.append((i, cur, m.group(1)))
+
+    seen = set()
+    while todo:
+        f = todo.pop()
+        if f in seen or not is_nounwind(lines[defs[f]]):
+            continue
+        seen.add(f)
+        lines[defs[f]] = strip(lines[defs[f]])
+        for i, caller, how in sites.get(f, []) + (indirect if f in taken else []):
+            lines[i] = strip(lines[i])
+            if how == 'call':
+                todo.append(caller)
+
+    text = '\n'.join(lines)
+    for g, new in twins.items():
+        body = re.sub(r'\bnounwind\b ?', '', groups[g])
+        text = re.sub(rf'^(attributes #{g} = .*)$',
+                      lambda m: f'{m.group(1)}\nattributes #{new} = {{{body}}}', text, flags=re.M)
+    if n and not re.search(r'^declare .*@_Unwind_RaiseException\(', text, re.M):
+        extra_decls.append('declare i32 @_Unwind_RaiseException(ptr)')
+    return text
 
 
-if (os.environ.get('TRAP_TO_UNWIND')
-        and re.search(r'^declare .*@_Unwind_RaiseException\(', text, re.M)):
-    text = trap_to_unwind(text)
-
-trap_cookie = os.environ.get('TRAP_TO_BPF_THROW')
-if trap_cookie and re.search(r'call void @llvm\.trap\(\)', text):
-    text = re.sub(r'(tail\s+)?call void @llvm\.trap\(\)',
-                  f'call void @bpf_throw(i64 {int(trap_cookie, 0)})', text)
-    # The program may call bpf_throw by itself and have it declared already.
-    if not re.search(r'^declare\s.*@bpf_throw\(', text, re.MULTILINE):
-        decl_line = f'declare void @bpf_throw(i64) #{attr_num}'
-        subrt = make_proto('bpf_throw', decl_line)
-        dbg_id = alloc_id()
-        file_ref = di_file if di_file else '!0'
-        new_metadata.append(
-            f'!{dbg_id} = !DISubprogram(name: "bpf_throw", scope: {file_ref}, '
-            f'file: {file_ref}, type: {subrt}, '
-            f'flags: DIFlagPrototyped, spFlags: DISPFlagOptimized)')
-        extra_decls.append(
-            f'declare !dbg !{dbg_id} void @bpf_throw(i64) '
-            f'#{attr_num} section ".ksyms"')
+text = aborts_unwind(cleanup_goes_on(text))
 
 # The renames above can leave a clashing external `declare` for a name the
 # module defines; drop it — the calls bind to the module-local definition.

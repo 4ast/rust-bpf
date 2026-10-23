@@ -148,7 +148,6 @@ pub struct bpf_timer { __opaque: [u64; 2] }
 extern "C" {
     fn bpf_alloc(size: u64, flags: u64) -> *mut u8;
     fn bpf_free(ptr: *mut u8);
-    fn bpf_throw(cookie: u64) -> !;
     fn bpf_stream_vprintk(stream_id: i32, fmt: *const u8, args: *const u64,
                            len: u32) -> i32;
     fn bpf_stream_print_stack(stream_id: i32) -> i32;
@@ -885,9 +884,7 @@ macro_rules! bpf_ringbuf_map {
 /// without a panic.
 ///
 /// A panic must not leave an `extern "C"` function like the callback of a timer:
-/// rustc makes that an abort, which is bpf_throw(), which the verifier does not
-/// allow in a callback. It is enough that the compiler cannot rule a panic out,
-/// as with a call through a pointer.
+/// rustc makes that an abort.
 ///
 /// A macro, so that only the schedulers that use it need
 /// `#![feature(core_intrinsics)]`.
@@ -990,8 +987,7 @@ impl<T> SpinLock<T> {
 /// @f is not inlined. alloc aborts in a few places, e.g. when the closure of
 /// btree::mem::replace() panics or a reference count overflows, and an abort can
 /// only be turned into something that gets past the guard here, an unwind, when
-/// it is not in the same function as the guard. See TRAP_TO_UNWIND in
-/// add_ksyms.py.
+/// it is not in the same function as the guard. See add_ksyms.py.
 pub fn with_irqs_off<R>(f: impl FnOnce() -> R) -> R {
     #[inline(never)]
     fn outlined<R>(f: impl FnOnce() -> R) -> R { f() }
@@ -1347,23 +1343,18 @@ impl core::fmt::Write for BpfStream {
 
 /// See scx_simple.rs.
 #[panic_handler]
-#[inline(always)]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
-    let mut stream = BpfStream(BPF_STDERR);
-    if info.can_unwind() {
-        let _ = writeln!(stream, "{}", info);
-        unsafe { bpf_stream_print_stack(BPF_STDERR) };
-        unsafe { _Unwind_RaiseException(core::ptr::null_mut()) };
-    } else if let Some(msg) = info.message().as_str() {
-        let _ = stream.write_str(msg);
+    let _ = writeln!(BpfStream(BPF_STDERR), "{}", info);
+    unsafe {
+        bpf_stream_print_stack(BPF_STDERR);
+        _Unwind_RaiseException(core::ptr::null_mut());
+        core::hint::unreachable_unchecked()
     }
-    unsafe { bpf_throw(1) }
 }
 
 /// A failed allocation panics: it unwinds, so that interrupts are restored,
-/// locks and references released on the way out. bpf_throw() would leave all
-/// that behind, and the verifier refuses it where something is held.
+/// locks and references released on the way out.
 #[alloc_error_handler]
 fn oom(layout: Layout) -> ! {
     panic!("memory allocation of {} bytes failed", layout.size())

@@ -138,6 +138,12 @@ mod imp {
         }
     }
 
+    /// std::process::abort()
+    #[inline(always)]
+    pub fn abort() -> ! {
+        core::intrinsics::abort()
+    }
+
     #[alloc_error_handler]
     fn alloc_error(_layout: Layout) -> ! {
         // unwinds: what the program holds is released by Drop
@@ -195,6 +201,9 @@ mod imp {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| unsafe { PANIC_LINE })
     }
 }
+
+#[cfg(target_arch = "bpf")]
+pub use imp::abort;
 
 /// std::panic::catch_unwind() without std. Err is the line of the panic.
 pub fn catch<F: FnOnce() -> R, R>(f: F) -> Result<R, u32> {

@@ -251,3 +251,69 @@ test!(panic_out_of_memory, {
         check!(log_is(b"m"));
     }
 });
+
+// What follows aborts the process with std. A BPF program cannot just stop: what
+// it holds has to be released. So an abort unwinds, and it can be caught. The
+// frames that have a landing pad for the call run their Drop impls.
+
+// A Drop that runs in a landing pad panics.
+#[cfg(target_arch = "bpf")]
+struct PanicsInDrop;
+#[cfg(target_arch = "bpf")]
+impl Drop for PanicsInDrop {
+    fn drop(&mut self) {
+        if bb(true) {
+            panic!("in drop");
+        }
+    }
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(never)]
+fn panics_twice() {
+    let _p = PanicsInDrop;
+    if bb(true) {
+        panic!("first");
+    }
+}
+
+test!(abort_panic_in_cleanup, {
+    #[cfg(target_arch = "bpf")]
+    {
+        log_reset();
+        let before = rt::panics();
+        let r = catch(|| {
+            let _d = D(b'o');
+            panics_twice();
+        });
+        check!(r.is_err());
+        check_eq!(rt::panics() - before, 2);
+        check!(log_is(b"o"));
+    }
+});
+
+// abort() in functions that have nothing else in them that unwinds.
+#[cfg(target_arch = "bpf")]
+#[inline(never)]
+fn aborts_at_7(x: u32) -> u32 {
+    if bb(x) == 7 {
+        rt::abort();
+    }
+    x + 1
+}
+
+#[cfg(target_arch = "bpf")]
+#[inline(never)]
+fn calls_it_twice(x: u32) -> u32 {
+    aborts_at_7(x) + aborts_at_7(x + 1)
+}
+
+test!(abort_in_a_leaf, {
+    #[cfg(target_arch = "bpf")]
+    {
+        check!(catch(|| calls_it_twice(bb(1))) == Ok(5));
+        check!(catch(|| calls_it_twice(bb(6))).is_err());
+        check!(catch(|| calls_it_twice(bb(7))).is_err());
+        check!(catch(|| calls_it_twice(bb(8))) == Ok(19));
+    }
+});

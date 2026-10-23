@@ -5,7 +5,9 @@
  * Loads a scheduler and attaches all of it: the struct_ops map and the programs
  * that go with it, fexit, tracepoints and so on. `bpftool struct_ops register`
  * only does the former. Stays until it gets SIGINT or SIGTERM, then everything
- * goes away.
+ * goes away. Before that it names the programs that were unwound, because of
+ * a panic or because the kernel ended a loop or a recursion that went on for too
+ * long, and prints what they have in stderr.
  *
  * -s sets the variable VAR, a tunable of the scheduler, before it is loaded.
  *
@@ -150,6 +152,25 @@ out:
 	return err;
 }
 
+static void report_unwound(struct bpf_object *obj)
+{
+	struct bpf_program *prog;
+	char buf[4096];
+	int n;
+
+	bpf_object__for_each_program(prog, obj) {
+		struct bpf_prog_info info = {};
+		__u32 len = sizeof(info);
+		int fd = bpf_program__fd(prog);
+
+		if (fd < 0 || bpf_prog_get_info_by_fd(fd, &info, &len) || !info.unwound)
+			continue;
+		printf("%s was unwound\n", bpf_program__name(prog));
+		while ((n = bpf_prog_stream_read(fd, BPF_STREAM_STDERR, buf, sizeof(buf), NULL)) > 0)
+			fwrite(buf, 1, n, stdout);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const char *prefixes[32], *ringbuf_name = NULL;
@@ -255,6 +276,7 @@ int main(int argc, char **argv)
 	}
 	if (rb)
 		printf("%lu records\n", nr_records);
+	report_unwound(obj);
 
 	while (nr_links)
 		bpf_link__destroy(links[--nr_links]);

@@ -161,13 +161,13 @@ The largest programs:
 
 | test | BPF insns | insns the verifier processed |
 |---|---|---|
-| regex_automata | 98,169 | 289,661 |
-| aho_corasick | 39,674 | 110,028 |
-| num_bigint_rational | 25,418 | 109,852 |
-| json_deserialize | 17,557 | 48,471 |
-| chrono_dates | 13,769 | 48,849 |
-| uuid_semver | 12,543 | 31,413 |
-| fmt_debug_std_types | 12,080 | 31,616 |
+| regex_automata | 98,169 | 316,574 |
+| aho_corasick | 39,674 | 112,798 |
+| num_bigint_rational | 25,418 | 123,804 |
+| json_deserialize | 17,557 | 46,632 |
+| chrono_dates | 13,769 | 56,470 |
+| uuid_semver | 12,543 | 29,444 |
+| fmt_debug_std_types | 12,080 | 26,686 |
 
 ## Schedulers
 
@@ -178,24 +178,24 @@ left out.
 
 | | from | Rust lines | programs | BPF insns | verifier, ms | what it uses |
 |---|---|---|---|---|---|---|
-| simple | | 375 | 8 | 6,186 | 42 | `BTreeMap` |
-| cosmos | sched-ext/scx | 1,213 | 14 | 8,841 | 61 | `BTreeMap`, arrays, 28 tunables and tables for user space |
+| simple | | 375 | 8 | 6,186 | 45 | `BTreeMap` |
+| cosmos | sched-ext/scx | 1,213 | 14 | 8,841 | 64 | `BTreeMap`, arrays, 28 tunables and tables for user space |
 | cpu0 | tools/sched_ext | 86 | 5 | 135 | 1 | |
-| central | tools/sched_ext | 366 | 7 | 3,712 | 48 | `SpinLock<VecDeque>`, `Vec` sized in `ops.init()` |
-| flatcg | tools/sched_ext | 713 | 15 | 18,809 | 277 | `BTreeMap<u64, Arc<CgrpCtx>>`, `BinaryHeap`, recursion down the cgroup tree |
-| pair | tools/sched_ext | 475 | 7 | 9,857 | 169 | `Vec<SpinLock<PairCtx>>`, `enum Outcome` |
-| sdt | tools/sched_ext | 368 | 8 | 10,648 | 283 | a generic radix tree allocator: `Node<T>`, `enum Entries<T>`, recursion |
-| qmap | tools/sched_ext | 1,482 | 23 | 84,008 | 730 | cid form of the ops, sub-schedulers, `BTreeMap` FIFOs, a table of timer functions |
-| bpfland | sched-ext/scx | 827 | 13 | 17,786 | 182 | `TaskMap`, `CpuSet`, `Option<Box<CpuSet>>` |
-| tickless | sched-ext/scx | 488 | 14 | 12,596 | 166 | `DsqIter` as an `Iterator`, `Vec` sorted by capacity |
-| beerland | sched-ext/scx | 655 | 14 | 15,895 | 147 | `Vtime` whose `Ord` wraps |
-| flash | sched-ext/scx | 765 | 17 | 34,094 | 261 | `trait Policy`, used through `&dyn Policy` |
-| rusty | sched-ext/scx | 1,121 | 14 | 30,166 | 321 | `Vec<Domain>`, 128 bit running averages, `Result` and `?` |
-| p2dq | sched-ext/scx, the core | 1,392 | 12 | 22,186 | 225 | `enum Promise` with data, `BTreeMap<(vtime, pid), ()>`, function pointers |
-| mitosis | sched-ext/scx, the core | 969 | 17 | 45,401 | 670 | `Arc<Config>` swapped as a whole, `Vec<Vec<Match>>`, `String`, `core::fmt` in `ops.dump()` |
-| lavd | sched-ext/scx | 3,990 | 37 | 66,733 | 847 | a Rust module per C file, fexit and tracepoint programs, a ring buffer |
+| central | tools/sched_ext | 366 | 7 | 3,712 | 50 | `SpinLock<VecDeque>`, `Vec` sized in `ops.init()` |
+| flatcg | tools/sched_ext | 713 | 15 | 18,809 | 289 | `BTreeMap<u64, Arc<CgrpCtx>>`, `BinaryHeap`, recursion down the cgroup tree |
+| pair | tools/sched_ext | 475 | 7 | 9,857 | 178 | `Vec<SpinLock<PairCtx>>`, `enum Outcome` |
+| sdt | tools/sched_ext | 368 | 8 | 10,648 | 278 | a generic radix tree allocator: `Node<T>`, `enum Entries<T>`, recursion |
+| qmap | tools/sched_ext | 1,482 | 23 | 84,008 | 746 | cid form of the ops, sub-schedulers, `BTreeMap` FIFOs, a table of timer functions |
+| bpfland | sched-ext/scx | 827 | 13 | 17,786 | 198 | `TaskMap`, `CpuSet`, `Option<Box<CpuSet>>` |
+| tickless | sched-ext/scx | 488 | 14 | 12,596 | 169 | `DsqIter` as an `Iterator`, `Vec` sorted by capacity |
+| beerland | sched-ext/scx | 655 | 14 | 15,895 | 158 | `Vtime` whose `Ord` wraps |
+| flash | sched-ext/scx | 765 | 17 | 34,094 | 270 | `trait Policy`, used through `&dyn Policy` |
+| rusty | sched-ext/scx | 1,121 | 14 | 30,166 | 339 | `Vec<Domain>`, 128 bit running averages, `Result` and `?` |
+| p2dq | sched-ext/scx, the core | 1,392 | 12 | 22,186 | 231 | `enum Promise` with data, `BTreeMap<(vtime, pid), ()>`, function pointers |
+| mitosis | sched-ext/scx, the core | 969 | 17 | 45,401 | 709 | `Arc<Config>` swapped as a whole, `Vec<Vec<Match>>`, `String`, `core::fmt` in `ops.dump()` |
+| lavd | sched-ext/scx | 3,990 | 37 | 66,733 | 868 | a Rust module per C file, fexit and tracepoint programs, a ring buffer |
 
-All 225 programs are verified in 4.4 seconds together.
+All 225 programs are verified in 4.6 seconds together.
 
 There is no user space part. What the loader of the original provides
 (topology, domains, tunables) is probed or computed in `ops.init()`.
@@ -290,22 +290,38 @@ LLVM BPF backend, on top of LLVM 24.
   to arena, to the context, to map values and to the stack. `addr_space_cast` of
   what is not a pointer to arena is a move. NULL stays NULL.
 - **A new main pass of the verifier.** The current one walks every path and
-  prunes. It loads 7 of the 20 programs of scx_simple and scx_cosmos. 12 stop at
-  the first loop over a `BTreeMap`: "The sequence of 8193 jumps is too complex".
-  The new pass is a fixpoint over the control flow graph. States that meet are
-  joined.
+  prunes. It loads 50 of the 225 programs of the schedulers and 143 of the 437
+  tests. What it says about the other 175 programs: "infinite loop detected"
+  118 times, "The sequence of 8193 jumps is too complex" 28 times, a recursive
+  call 15 times, "BPF program is too large" 14 times.
+  The new pass is a fixpoint over the control flow graph. Every basic block has
+  a set of states. States that meet are joined, unless the join would make up
+  what neither of them has where a check ahead can see it: a pointer and NULL,
+  a register that only one of them has set, the error codes -2 and 1 in front
+  of `if (ret == 0)`.
   - No limit on insns and jumps.
   - A static function is verified for the states at its entry, not for every
     chain of calls that leads to it.
+  - A pointer that is read from the table of functions is one of a set of
+    functions, in one state. `fmt()` of a trait object has 244 implementations
+    in the object with the tests of `k2_text.rs`. `callx` verifies every one of
+    them for the arguments that are there.
   - Loops: scalar evolution counts them. What it cannot count is walked for
     a while. The rest gets a `may_goto` that the verifier inserts.
     Termination is not proved. A loop without an exit is rejected.
   - Recursion is allowed. The verifier inserts a check of the stack that is
     left: 4 Kbyte for recursive frames.
   - 1024 functions per program, 32 call frames, 24 arguments of a static function.
-  - C programs gain too. Of the 3,597 programs of the kernel selftests that the
-    current verifier loads it loses 1. It loads 19 more, and processes 2.2
-    million insns instead of 5.2 million.
+  - C programs gain too:
+
+    | | programs | load | insns processed |
+    |---|---|---|---|
+    | kernel selftests | 6,076 | 3,782, now 3,843 | 7.31 million, now 3.64 million |
+    | Cilium | 144 | 144, now 144 | 1.15 million, now 0.28 million |
+    | sched-ext/scx, the schedulers in C | 471 | 468, now 468 | 3.66 million, now 0.55 million |
+
+    One program that loads today is rejected: a selftest that was written to
+    show what a join can lose.
 - **A program that runs out of budget is unwound.** It cannot just stop: what it
   holds has to be released. The function with the loop or the recursion leaves
   with `unwind_exit`, the landing pads of the callers run, and the program
@@ -322,8 +338,8 @@ LLVM BPF backend, on top of LLVM 24.
   ```
 
   There is no landing pad for a loop in a function that holds a reference,
-  an RCU section or interrupt flags itself. Such a loop is left. Of the 3,414
-  `may_goto` that the verifier added to the 225 programs of the schedulers 71 are
+  an RCU section or interrupt flags itself. Such a loop is left. Of the 3,402
+  `may_goto` that the verifier added to the 225 programs of the schedulers 79 are
   of that kind.
 - `bpf_alloc()`, `bpf_free()`: the heap. `bpf_arena_memcpy()`,
   `bpf_arena_memcmp()`.
